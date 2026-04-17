@@ -41,7 +41,7 @@ class KIS_Trader:
         try:
             url = f"{self.base_url}/uapi/overseas-stock/v1/trading/inquire-psbl-order"
             headers = {"Content-Type":"application/json", "authorization":f"Bearer {self.token}", "appkey":self.app_key, "appsecret":self.app_secret, "tr_id":"JTTT1001U"}
-            # 잔고조회는 NAS(나스닥) 코드로 통일해도 무방
+            # 잔고조회는 NAS(나스닥) 코드로 고정해도 무방
             params = {"CANO":self.cano, "ACNT_PRDT_CD":self.acnt_prdt_cd, "OVRS_EXGI":"NAS", "PDNO":"UPRO", "OVRS_ORD_UNPR":"0"}
             res = requests.get(url, headers=headers, params=params)
             if res.status_code == 200:
@@ -60,7 +60,7 @@ class KIS_Trader:
 
     def get_current_price(self, ticker):
         try:
-            # [수정] 조회용 EXCD 규격: 나스닥=NAS, 아멕스(UPRO)=AMS
+            # [규격] 조회용 EXCD: 나스닥=NAS, 아멕스(UPRO)=AMS
             excd = "AMS" if ticker in ["UPRO", "SPXU"] else "NAS"
             url = f"{self.base_url}/uapi/overseas-stock/v1/quotations/price"
             headers = {
@@ -68,7 +68,7 @@ class KIS_Trader:
                 "authorization": f"Bearer {self.token}",
                 "appkey": self.app_key,
                 "appsecret": self.app_secret,
-                "tr_id": "JTTT1101U"
+                "tr_id": "JTTT1101U" # 미국 주식 시세 TR ID
             }
             params = {"AUTH": "", "EXCD": excd, "PDNO": ticker}
             res = requests.get(url, headers=headers, params=params)
@@ -84,13 +84,13 @@ class KIS_Trader:
                 self.last_error = res_json.get('rt_msg', '조회 실패')
                 return 0.0
         except Exception as e:
-            self.last_error = str(e)[:20]
+            self.last_error = "API 응답 에러"
             return 0.0
 
     def send_order(self, ticker, qty, side="BUY"):
         if not self.token or qty <= 0: return {"rt_msg": "수량 부족"}
         try:
-            # [수정] 주문용 OVRS_EXGI 규격: 나스닥=NASD, 아멕스(UPRO)=AMEX
+            # [규격] 주문용 OVRS_EXGI: 나스닥=NASD, 아멕스(UPRO)=AMEX
             excd = "AMEX" if ticker in ["UPRO", "SPXU"] else "NASD"
             url = f"{self.base_url}/uapi/overseas-stock/v1/trading/order"
             tr_id = "JTTT1002U" if side == "BUY" else "JTTT1006U"
@@ -100,7 +100,7 @@ class KIS_Trader:
             return res.json()
         except Exception as e: return {"rt_msg": str(e)}
 
-# --- 데이터 및 모델 로직 ---
+# --- 데이터 로직 ---
 @st.cache_data(ttl=3600)
 def get_data():
     tickers = ['^GSPC', '^VIX', '^TNX', 'DX-Y.NYB', 'XLK', 'GC=F', 'CL=F', 'QQQ']
@@ -158,7 +158,7 @@ async def run_trading_flow(pred, prob, df):
         if bot:
             await bot.send_message(chat_id=chat_id, text=f"☀️ [모닝 리포트] 장 마감 전 전량 매도 완료")
 
-# --- Streamlit UI (절대 유지) ---
+# --- Streamlit UI ---
 st.set_page_config(page_title="S&P 500 AI 3x Master", layout="wide")
 df = get_data()
 pred, prob = predict_market(df)
