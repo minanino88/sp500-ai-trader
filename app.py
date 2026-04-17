@@ -117,7 +117,7 @@ async def run_trading_flow(pred, prob, df):
     conf = max(prob) * 100
     trader = KIS_Trader()
 
-    if current_hour == 1:
+    if current_hour == 2:
         exec_msg = "⚪ 조건 미달"
         if df.empty: exec_msg = "⚠️ 데이터 수집 실패"
         elif conf >= 70 and pred != 2:
