@@ -1,20 +1,24 @@
-name: S&P 500 Double Check Prediction
+name: S&P 500 Prediction & Accuracy
 
 on:
   schedule:
-    - cron: '0 11 * * *'   # 한국 시간 오후 8:00
-    - cron: '15 13 * * *'  # 한국 시간 오후 10:15
+    - cron: '0 11 * * *'  # 저녁 8:00 (예측)
+    - cron: '15 13 * * *' # 저녁 10:15 (최종확정)
+    - cron: '0 22 * * *'  # 다음날 아침 7:00 (정산 - UTC 22:00)
   workflow_dispatch:
+
+permissions: # 파일 저장을 위한 권한 추가
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4 # v3에서 v4로 변경 (경고 해결!)
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5 # v4에서 v5로 변경 (경고 해결!)
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
@@ -22,9 +26,17 @@ jobs:
         run: |
           pip install -r requirements.txt
 
-      - name: Run Prediction Script
+      - name: Run Script
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
           GITHUB_ACTIONS: "true"
         run: python app.py
+
+      - name: Commit and Push changes # 성적표(history.csv)를 깃허브에 저장
+        run: |
+          git config --global user.name "GitHub Action"
+          git config --global user.email "action@github.com"
+          git add history.csv
+          git commit -m "Update prediction history" || echo "No changes to commit"
+          git push
