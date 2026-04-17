@@ -18,7 +18,7 @@ KST = pytz.timezone('Asia/Seoul')
 now_kst = datetime.now(KST)
 current_hour = now_kst.hour
 
-# --- 한국투자증권 API 클래스 (거래소 코드 규격 수정) ---
+# --- 한국투자증권 API 클래스 (거래소 코드 정밀 매핑) ---
 class KIS_Trader:
     def __init__(self):
         self.base_url = "https://openapi.koreainvestment.com:9443"
@@ -41,7 +41,7 @@ class KIS_Trader:
         try:
             url = f"{self.base_url}/uapi/overseas-stock/v1/trading/inquire-psbl-order"
             headers = {"Content-Type":"application/json", "authorization":f"Bearer {self.token}", "appkey":self.app_key, "appsecret":self.app_secret, "tr_id":"JTTT1001U"}
-            # 잔고 조회용 거래소 코드는 보통 NAS(나스닥) 고정 사용
+            # 잔고 조회 시 거래소 코드는 'NAS' 사용
             params = {"CANO":self.cano, "ACNT_PRDT_CD":self.acnt_prdt_cd, "OVRS_EXGI":"NAS", "PDNO":"UPRO", "OVRS_ORD_UNPR":"0"}
             res = requests.get(url, headers=headers, params=params)
             if res.status_code == 200:
@@ -60,7 +60,7 @@ class KIS_Trader:
 
     def get_current_price(self, ticker):
         try:
-            # [핵심 수정] KIS API 규격: 나스닥은 'NAS', 아멕스(UPRO)는 'AMS'
+            # [규격 1] 조회용 거래소 코드: 나스닥=NAS, 아멕스(UPRO)=AMS
             excd = "AMS" if ticker in ["UPRO", "SPXU"] else "NAS"
             url = f"{self.base_url}/uapi/overseas-stock/v1/quotations/price"
             headers = {
@@ -90,7 +90,8 @@ class KIS_Trader:
     def send_order(self, ticker, qty, side="BUY"):
         if not self.token or qty <= 0: return {"rt_msg": "수량 부족"}
         try:
-            excd = "AMS" if ticker in ["UPRO", "SPXU"] else "NAS"
+            # [규격 2] 주문용 거래소 코드: 나스닥=NASD, 아멕스(UPRO)=AMEX
+            excd = "AMEX" if ticker in ["UPRO", "SPXU"] else "NASD"
             url = f"{self.base_url}/uapi/overseas-stock/v1/trading/order"
             tr_id = "JTTT1002U" if side == "BUY" else "JTTT1006U"
             headers = {"Content-Type":"application/json", "authorization":f"Bearer {self.token}", "appkey":self.app_key, "appsecret":self.app_secret, "tr_id":tr_id}
@@ -99,7 +100,7 @@ class KIS_Trader:
             return res.json()
         except Exception as e: return {"rt_msg": str(e)}
 
-# --- 데이터 및 모델 (70% 문턱값 적용) ---
+# --- 데이터 로직 ---
 @st.cache_data(ttl=3600)
 def get_data():
     tickers = ['^GSPC', '^VIX', '^TNX', 'DX-Y.NYB', 'XLK', 'GC=F', 'CL=F', 'QQQ']
@@ -123,18 +124,6 @@ def predict_market(df):
     pred = 1 if prob[1] >= 0.70 else 0 if prob[0] >= 0.70 else 2
     return pred, prob
 
-# --- 이력 관리 ---
-def update_history(date, pred, actual=None):
-    file_name = 'history.csv'
-    new_data = pd.DataFrame([[date, pred, actual]], columns=['Date', 'Pred', 'Actual'])
-    if os.path.exists(file_name):
-        history = pd.read_csv(file_name)
-        if date in history['Date'].values:
-            if actual is not None: history.loc[history['Date'] == date, 'Actual'] = actual
-        else: history = pd.concat([history, new_data])
-    else: history = new_data
-    history.to_csv(file_name, index=False)
-
 # --- 트레이딩 로직 (01:00 매수 / 04:50 매도) ---
 async def run_trading_flow(pred, prob, df):
     token, chat_id = os.getenv('TELEGRAM_TOKEN'), os.getenv('CHAT_ID')
@@ -144,7 +133,6 @@ async def run_trading_flow(pred, prob, df):
 
     if current_hour == 2:
         exec_msg = "⚪ 조건 미달"
-        update_history(today_str, pred)
         if conf >= 70 and pred != 2:
             ticker = "UPRO" if pred == 1 else "SPXU"
             balance = trader.get_balance()
@@ -152,8 +140,8 @@ async def run_trading_flow(pred, prob, df):
             if price > 0:
                 qty = int((balance * 0.95) / price)
                 if qty >= 1:
-                    trader.send_order(ticker, qty, "BUY")
-                    exec_msg = f"🔥 [3x 매수성공] {ticker} {qty}주 ($ {balance:.2f})"
+                    res = trader.send_order(ticker, qty, "BUY")
+                    exec_msg = f"🔥 [3x 매수성공] {ticker} {qty}주 ($ {balance:.2f})" if res.get('rt_cd') == '0' else f"❌ 주문실패: {res.get('rt_msg')}"
                 else: exec_msg = "💡 잔고 부족"
             else:
                 exec_msg = f"⚠️ 조회 실패: {trader.last_error}"
@@ -169,16 +157,10 @@ async def run_trading_flow(pred, prob, df):
             if ticker in ["UPRO", "SPXU"] and qty > 0:
                 trader.send_order(ticker, qty, side="SELL")
                 sell_report = f"✅ [수익실현] {ticker} {qty}주 매도성공"
-        
-        yesterday_str = (now_kst - timedelta(days=1)).strftime('%Y-%m-%d')
-        actual = 1 if df['SP500'].iloc[-1] > df['SP500'].iloc[-2] else 0
-        update_history(yesterday_str, None, actual)
         if bot:
-            h_df = pd.read_csv('history.csv').dropna() if os.path.exists('history.csv') else pd.DataFrame()
-            win_msg = f"\n누적 승률: {(h_df['Pred'] == h_df['Actual']).mean()*100:.1f}%" if not h_df.empty else ""
-            await bot.send_message(chat_id=chat_id, text=f"☀️ [모닝 리포트]\n{sell_report}{win_msg}")
+            await bot.send_message(chat_id=chat_id, text=f"☀️ [모닝 리포트]\n{sell_report}")
 
-# --- Streamlit UI (절대 삭제 금지) ---
+# --- Streamlit UI (민환님 요청으로 절대 유지) ---
 st.set_page_config(page_title="S&P 500 AI 3x Master", layout="wide")
 df = get_data()
 pred, prob = predict_market(df)
@@ -191,17 +173,10 @@ with col1:
 with col2:
     st.metric("AI 신뢰도", f"{max(prob)*100:.1f}%")
 with col3:
-    if os.path.exists('history.csv'):
-        h_df = pd.read_csv('history.csv').dropna()
-        wr = (h_df['Pred'] == h_df['Actual']).mean()*100 if not h_df.empty else 0
-        st.metric("누적 수율(정합성)", f"{wr:.1f}%")
+    st.metric("학신 모델", "RF + XGB 앙상블")
 
 st.divider()
-st.subheader("📊 매매 이력 (History)")
-if os.path.exists('history.csv'):
-    st.table(pd.read_csv('history.csv').tail(10))
-
-st.subheader("📈 전략 시뮬레이션")
+st.subheader("📈 전략 시뮬레이션 (최근 60일)")
 def calculate_perf(df):
     initial = 1000000
     ai, hold = [initial], [initial]
