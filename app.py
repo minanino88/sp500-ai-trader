@@ -105,17 +105,33 @@ if pred is not None:
     st.set_page_config(page_title="S&P 500 AI Trader", layout="wide")
     st.title("📊 S&P 500 AI 성적표 & 리포트")
 
-    if os.path.exists('history.csv'):
-        try:
-            h_df = pd.read_csv('history.csv').dropna()
-            if not h_df.empty:
-                h_df['적중'] = (h_df['예측'] == h_df['실제']).astype(int)
-                win_rate = h_df['적중'].mean() * 100
+    # --- 스트림릿 화면 구성 (이 부분으로 교체) ---
+if os.path.exists('history.csv'):
+    try:
+        # dropna()를 제거해서 데이터가 비어있어도 읽어오게 합니다.
+        h_df = pd.read_csv('history.csv')
+        
+        if not h_df.empty:
+            # 아직 결과가 없는 칸(NaN)을 '확인 중'으로 표시합니다.
+            display_df = h_df.tail(10).copy().fillna('-')
+            
+            # 승률 계산은 결과가 있는 데이터로만 합니다.
+            scored_df = h_df.dropna()
+            if not scored_df.empty:
+                scored_df['적중'] = (scored_df['예측'] == scored_df['실제']).astype(int)
+                win_rate = scored_df['적중'].mean() * 100
                 st.metric("AI 누적 정합성(승률)", f"{win_rate:.1f}%")
-                st.subheader("📅 최근 예측 이력")
-                st.table(h_df.tail(10))
-        except:
-            st.info("데이터를 쌓는 중입니다... (내일 아침 7시 첫 정산)")
+            else:
+                st.metric("AI 누적 정합성(승률)", "측정 중...")
+
+            st.subheader("📅 최근 예측 이력")
+            # 숫자를 보기 좋게 변환
+            display_df['예측'] = display_df['예측'].map({1: 'LONG', 0: 'SHORT', '-': '-'})
+            display_df['실제'] = display_df['실제'].map({1: 'LONG', 0: 'SHORT', '-': '-'})
+            st.table(display_df)
+    except Exception as e:
+        st.info("성적표를 생성하고 있습니다... (내일 아침 7시 첫 정산)")
+
 
     st.divider()
     st.subheader(f"현재 예측: {result_text} (신뢰도 {max(prob)*100:.1f}%)")
