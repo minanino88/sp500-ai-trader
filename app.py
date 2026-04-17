@@ -92,7 +92,7 @@ df = get_data()
 pred, prob = predict_market(df)
 
 if pred is not None:
-    result_text = "🚀 LONG (매수)" if pred == 1 else "📉 SHORT (매도/관망)"
+    result_text = "🚀 LONG (매수)" if pred == 1 else "📉 SHORT (매수)"
     today_str = now_kst.strftime('%Y-%m-%d')
     update_history(today_str, pred)
 
