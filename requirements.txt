@@ -6,3 +6,4 @@ plotly
 pytz
 python-telegram-bot
 requests-cache
+xgboost
