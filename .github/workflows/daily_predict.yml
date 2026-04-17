@@ -2,23 +2,21 @@ name: S&P 500 Double Check Prediction
 
 on:
   schedule:
-    # 1. 한국 시간 오후 8:00 (11:00 UTC)
-    - cron: '0 11 * * *'
-    # 2. 한국 시간 오후 10:15 (13:15 UTC) - 개장 직전 최종 확정
-    - cron: '15 13 * * *'
-  workflow_dispatch: # 수동 실행 버튼
+    - cron: '0 11 * * *'   # 한국 시간 오후 8:00
+    - cron: '15 13 * * *'  # 한국 시간 오후 10:15
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4 # v3에서 v4로 업데이트
+        uses: actions/checkout@v4 # v3에서 v4로 변경 (경고 해결!)
 
       - name: Set up Python
-        uses: actions/setup-python@v5 # v4에서 v5로 업데이트
+        uses: actions/setup-python@v5 # v4에서 v5로 변경 (경고 해결!)
         with:
-          python-version: '3.10' # 파이썬 버전도 안정적인 최신으로 상향
+          python-version: '3.10'
 
       - name: Install dependencies
         run: |
