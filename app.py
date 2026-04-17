@@ -28,13 +28,20 @@ class KIS_Trader:
         self.acnt_prdt_cd = os.getenv('KIS_ACNT_PRDT_CD', '01')
         self.token = self.get_token()
 
-    def get_token(self):
+        def get_token(self):
         try:
             url = f"{self.base_url}/oauth2/tokenP"
             data = {"grant_type": "client_credentials", "appkey": self.app_key, "secretkey": self.app_secret}
             res = requests.post(url, headers={"content-type": "application/json"}, data=json.dumps(data))
+            
+            # 서버 응답 내용을 직접 확인하는 코드 추가
+            if res.status_code != 200:
+                return f"에러:{res.status_code}" # 에러 코드 확인용
+                
             return res.json().get('access_token')
-        except: return None
+        except: 
+            return None
+
 
     def get_balance(self):
         url = f"{self.base_url}/uapi/overseas-stock/v1/trading/inquire-psbl-order"
