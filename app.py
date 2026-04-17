@@ -19,6 +19,9 @@ import time
 from telegram import Bot
 import warnings
 warnings.filterwarnings(‘ignore’)
+TRADING_ENABLED = False  # 이걸 False로 바꾸면 아래 로직이 돌아도 주문이 안 나갑니다.
+
+
 
 # ──────────────────────────────────────────
 
@@ -418,7 +421,8 @@ trader     = KIS_Trader()
 consec_loss = check_circuit_breaker()
 
 # ── 새벽 1시: 매수 판단 ──
-if current_hour == 1:
+if current_hour == 1 and TRADING_ENABLED: # 이 부분에 조건 추가
+
     exec_msg = "⚪ 조건 미달"
     update_history(today_str, pred)
 
