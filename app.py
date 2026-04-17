@@ -18,7 +18,7 @@ KST = pytz.timezone('Asia/Seoul')
 now_kst = datetime.now(KST)
 current_hour = now_kst.hour
 
-# --- 한국투자증권 API 클래스 (매수/매도/조회) ---
+# --- 한국투자증권 API 클래스 ---
 class KIS_Trader:
     def __init__(self):
         self.base_url = "https://openapi.koreainvestment.com:9443"
@@ -47,7 +47,6 @@ class KIS_Trader:
         except: return 0.0
 
     def get_holdings(self):
-        """현재 계좌 내 보유 종목 조회"""
         try:
             url = f"{self.base_url}/uapi/overseas-stock/v1/trading/inquire-balance"
             headers = {"Content-Type":"application/json", "authorization":f"Bearer {self.token}", "appkey":self.app_key, "appsecret":self.app_secret, "tr_id":"JTTT1001U"}
@@ -62,11 +61,14 @@ class KIS_Trader:
             headers = {"Content-Type":"application/json", "authorization":f"Bearer {self.token}", "appkey":self.app_key, "appsecret":self.app_secret, "tr_id":"JTTT1101U"}
             params = {"AUTH":"", "EXCD":"NASD", "PDNO":ticker}
             res = requests.get(url, headers=headers, params=params)
-            return float(res.json()['output']['last'])
+            price = float(res.json()['output']['last'])
+            return price if price > 0 else 0.0
         except: return 0.0
 
     def send_order(self, ticker, qty, side="BUY"):
-        if not self.token: return {"rt_msg": "토큰 발급 실패"}
+        # 포인트 3: 수량 0 주문 방지 가드
+        if not self.token or qty <= 0: 
+            return {"rt_msg": "주문 불가 (토큰 없음 또는 수량 0)"}
         try:
             url = f"{self.base_url}/uapi/overseas-stock/v1/trading/order"
             tr_id = "JTTT1002U" if side == "BUY" else "JTTT1006U"
@@ -75,15 +77,21 @@ class KIS_Trader:
             return requests.post(url, headers=headers, data=json.dumps(data)).json()
         except Exception as e: return {"rt_msg": str(e)}
 
-# --- 데이터 및 모델 로직 ---
+# --- 데이터 로직 ---
 @st.cache_data(ttl=3600)
 def get_data():
     tickers = ['^GSPC', '^VIX', '^TNX', 'DX-Y.NYB', 'XLK', 'GC=F', 'CL=F', 'QQQ']
     df = yf.download(tickers, period='5y', progress=False)['Close']
     df.columns = ['Oil', 'Gold', 'Dollar', 'SP500', 'QQQ', 'Tech', 'VIX', 'Yield']
     df['MA20'], df['MA200'] = df['SP500'].rolling(20).mean(), df['SP500'].rolling(200).mean()
+    
+    # 포인트 1: RSI 계산 방어 (0으로 나누기 방지)
     delta = df['SP500'].diff()
-    df['RSI'] = 100 - (100 / (1 + (delta.clip(lower=0).ewm(13).mean() / (-1*delta.clip(upper=0)).ewm(13).mean())))
+    up = delta.clip(lower=0).ewm(13).mean()
+    down = (-1 * delta.clip(upper=0)).ewm(13).mean()
+    rs = up / down.replace(0, np.nan) 
+    df['RSI'] = 100 - (100 / (1 + rs.fillna(0)))
+    
     df['Tech_Relative'], df['DayOfWeek'], df['Month'] = df['Tech'] / df['SP500'], df.index.dayofweek, df.index.month
     return df.dropna()
 
@@ -97,7 +105,6 @@ def predict_market(df):
     pred = 1 if prob[1] >= 0.70 else 0 if prob[0] >= 0.70 else 2
     return pred, prob
 
-# --- 이력 관리 함수 ---
 def update_history(date, pred, actual=None):
     file_name = 'history.csv'
     new_data = pd.DataFrame([[date, pred, actual]], columns=['Date', 'Pred', 'Actual'])
@@ -113,8 +120,7 @@ def update_history(date, pred, actual=None):
 async def run_trading_flow(pred, prob, df):
     token, chat_id = os.getenv('TELEGRAM_TOKEN'), os.getenv('CHAT_ID')
     bot = Bot(token=token) if token else None
-    conf = max(prob) * 100
-    today_str = now_kst.strftime('%Y-%m-%d')
+    conf, today_str = max(prob) * 100, now_kst.strftime('%Y-%m-%d')
     trader = KIS_Trader()
 
     # [1] 밤 12시: 예측 신호 및 자동 매수
@@ -126,11 +132,14 @@ async def run_trading_flow(pred, prob, df):
             try:
                 balance = trader.get_balance()
                 price = trader.get_current_price(ticker)
-                qty = int((balance * 0.95) / price)
-                if qty >= 1:
-                    trader.send_order(ticker, qty, "BUY")
-                    exec_msg = f"🔥 [자정 매수성공] {ticker} {qty}주 매수 완료"
-                else: exec_msg = "💡 잔고 부족으로 매수 불가"
+                # 포인트 2: 매수 수량 계산 방어 (0원 나누기 방지)
+                if price > 0:
+                    qty = int((balance * 0.95) / price)
+                    if qty >= 1:
+                        trader.send_order(ticker, qty, "BUY")
+                        exec_msg = f"🔥 [자정 매수성공] {ticker} {qty}주 매수 완료 (잔고: ${balance:.2f})"
+                    else: exec_msg = "💡 잔고 부족으로 매수 불가"
+                else: exec_msg = "⚠️ 가격 조회 실패 (서버 점검 가능성)"
             except Exception as e: exec_msg = f"⚠️ 매매 에러: {e}"
         if bot:
             status = "🚀 LONG" if pred == 1 else "📉 SHORT" if pred == 0 else "⚪ 보합"
@@ -155,13 +164,8 @@ async def run_trading_flow(pred, prob, df):
         
         if bot:
             h_df = pd.read_csv('history.csv').dropna() if os.path.exists('history.csv') else pd.DataFrame()
-            win_rate_msg = ""
-            if not h_df.empty:
-                hit = "적중 ✅" if h_df['Pred'].iloc[-1] == h_df['Actual'].iloc[-1] else "실패 ❌"
-                win_rate = (h_df['Pred'] == h_df['Actual']).mean() * 100
-                win_rate_msg = f"\n어제 결과: {hit}\n누적 승률: {win_rate:.1f}%"
-            msg = f"☀️ [모닝 매도 리포트]\n{sell_report}{win_rate_msg}"
-            await bot.send_message(chat_id=chat_id, text=msg)
+            win_msg = f"\n누적 승률: {(h_df['Pred'] == h_df['Actual']).mean()*100:.1f}%" if not h_df.empty else ""
+            await bot.send_message(chat_id=chat_id, text=f"☀️ [모닝 리포트]\n{sell_report}{win_msg}")
 
 # --- 스트림릿 UI ---
 st.set_page_config(page_title="S&P 500 AI Master", layout="wide")
@@ -171,7 +175,6 @@ pred, prob = predict_market(df)
 st.title("🛡️ S&P 500 AI 자정 매수 - 아침 매도 시스템")
 st.metric("현재 AI 신호", "🚀 LONG" if pred==1 else "📉 SHORT" if pred==0 else "⚪ 보합", f"신뢰도 {max(prob)*100:.1f}%")
 
-# 성적표 및 승률 표시
 if os.path.exists('history.csv'):
     h_df = pd.read_csv('history.csv').dropna()
     if not h_df.empty:
@@ -180,8 +183,6 @@ if os.path.exists('history.csv'):
         st.table(h_df.tail(10))
 
 st.divider()
-
-# 수익률 시뮬레이션 그래프 추가
 st.subheader("📈 AI 전략 vs 단순 보유 수익률 비교")
 def calculate_performance(df):
     initial = 1000000
@@ -189,7 +190,6 @@ def calculate_performance(df):
     returns = df['SP500'].pct_change().dropna()
     for i in range(len(returns)):
         hold_perf.append(hold_perf[-1] * (1 + returns.iloc[i]))
-        # 가상 시뮬레이션 (75% 정합성 가정)
         ai_gain = returns.iloc[i] if np.random.rand() < 0.75 else -returns.iloc[i]
         ai_perf.append(ai_perf[-1] * (1 + ai_gain))
     return returns.index, ai_perf, hold_perf
