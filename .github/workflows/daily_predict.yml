@@ -1,13 +1,13 @@
-name: S&P 500 Prediction & Accuracy
+name: S&P 500 High-Accuracy Prediction
 
 on:
   schedule:
-    - cron: '0 11 * * *'  # 저녁 8:00 (예측)
-    - cron: '15 13 * * *' # 저녁 10:15 (최종확정)
-    - cron: '0 22 * * *'  # 다음날 아침 7:00 (정산 - UTC 22:00)
+    - cron: '0 11 * * *'  # 저녁 8:00 (1차 신호)
+    - cron: '0 15 * * *'  # 밤 12:00 (최종 확정 - 정합성 최고 시간대)
+    - cron: '0 22 * * *'  # 다음날 아침 7:00 (성적표 정산)
   workflow_dispatch:
 
-permissions: # 파일 저장을 위한 권한 추가
+permissions:
   contents: write
 
 jobs:
@@ -33,10 +33,10 @@ jobs:
           GITHUB_ACTIONS: "true"
         run: python app.py
 
-      - name: Commit and Push changes # 성적표(history.csv)를 깃허브에 저장
+      - name: Commit and Push
         run: |
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
           git add history.csv
-          git commit -m "Update prediction history" || echo "No changes to commit"
+          git commit -m "Update accuracy history" || echo "No changes"
           git push
