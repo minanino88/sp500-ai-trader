@@ -1,14 +1,13 @@
-name: S&P 500 High-Accuracy Prediction
+name: S&P 500 Midnight Alpha
 
 on:
   schedule:
-    - cron: '0 11 * * *'  # 저녁 8:00 (1차 신호)
-    - cron: '0 15 * * *'  # 밤 12:00 (최종 확정 - 정합성 최고 시간대)
-    - cron: '0 22 * * *'  # 다음날 아침 7:00 (성적표 정산)
-  workflow_dispatch:
+    - cron: '0 15 * * *'  # 한국 시간 밤 12:00 (15:00 UTC) -> 메인 매수 신호 알람
+    - cron: '0 22 * * *'  # 한국 시간 아침 07:00 (22:00 UTC) -> 성적표 자동 정산 (무음)
+  workflow_dispatch:      # 언제든 수동으로 눌러볼 수 있는 버튼
 
 permissions:
-  contents: write
+  contents: write         # 성적표(history.csv) 저장을 위해 꼭 필요
 
 jobs:
   build:
@@ -26,17 +25,17 @@ jobs:
         run: |
           pip install -r requirements.txt
 
-      - name: Run Script
+      - name: Run AI Model
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
           GITHUB_ACTIONS: "true"
         run: python app.py
 
-      - name: Commit and Push
+      - name: Save History
         run: |
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
           git add history.csv
-          git commit -m "Update accuracy history" || echo "No changes"
+          git commit -m "Update history" || echo "No changes"
           git push
