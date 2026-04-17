@@ -48,6 +48,8 @@ def get_data():
     df['MACD'] = df['S&P500'].ewm(span=12).mean() - df['S&P500'].ewm(span=26).mean()
     return df.dropna()
 
+# (앞부분 데이터 수집 로직은 동일)
+
 def predict_market(df):
     if df is None or len(df) < 100:
         return None, None
@@ -61,8 +63,18 @@ def predict_market(df):
     model.fit(X, y)
     
     latest = df[features].tail(1)
-    pred = model.predict(latest)[0]
-    prob = model.predict_proba(latest)[0]
+    prob = model.predict_proba(latest)[0] # [Short 확률, Long 확률]
+    
+    # --- 신뢰도 임계값 설정 ---
+    THRESHOLD = 0.60 # 60% 미만은 보합 처리
+    
+    if prob[1] >= THRESHOLD:
+        pred = 1 # 확실한 상승
+    elif prob[0] >= THRESHOLD:
+        pred = 0 # 확실한 하락
+    else:
+        pred = 2 # 보합 (Neutral)
+        
     return pred, prob
 
 # 2. 이력 관리 로직 (한글 깨짐 및 파일 생성 오류 방지)
@@ -89,12 +101,21 @@ def update_history(date, pred, actual=None):
 
 # --- 메인 실행 로직 ---
 df = get_data()
+
+# --- 결과 출력 부분 수정 ---
 pred, prob = predict_market(df)
 
 if pred is not None:
-    result_text = "🚀 LONG (매수)" if pred == 1 else "📉 SHORT (매수)"
-    today_str = now_kst.strftime('%Y-%m-%d')
-    update_history(today_str, pred)
+    if pred == 1:
+        result_text = "🚀 LONG (매수)"
+    elif pred == 0:
+        result_text = "📉 SHORT (매도/인버스)"
+    else:
+        result_text = "⚪ 보합 (관망/신호약함)"
+    
+    confidence = max(prob) * 100
+    
+    # (이력 업데이트 및 스트림릿 출력 로직은 이전과 동일하게 유지)
 
     if current_hour == 7: # 아침 정산
         yesterday_str = (now_kst - timedelta(days=1)).strftime('%Y-%m-%d')
