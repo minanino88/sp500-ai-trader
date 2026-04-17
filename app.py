@@ -10,167 +10,149 @@ import os
 import asyncio
 from telegram import Bot
 
-# 야후 파이낸스 캐시 문제 해결을 위한 설정
-import requests_cache
-session = None # 캐시 사용 안 함
-
-# 시간 설정
+# 시간 및 환경 설정
 KST = pytz.timezone('Asia/Seoul')
 now_kst = datetime.now(KST)
 current_hour = now_kst.hour
 
-# 1. 데이터 수집 및 예측 로직 (안정성 강화)
+# 1. 고도화된 데이터 수집 (DXY, XLK, Gold, Oil, QQQ 추가)
 def get_data():
-    tickers = ['^GSPC', '^VIX', '^TNX']
-    # 'auto_adjust'와 'multi_level_col' 설정을 추가하여 데이터 구조를 안정화합니다.
-    df = yf.download(tickers, period='5y', progress=False)
-    
-    if df.empty or 'Close' not in df:
-        st.error("데이터를 불러오지 못했습니다. 잠시 후 다시 시도해주세요.")
+    # S&P500, VIX, 10년물 금리, 달러인덱스, 기술주섹터, 금, 유가, 나스닥
+    tickers = ['^GSPC', '^VIX', '^TNX', 'DX-Y.NYB', 'XLK', 'GC=F', 'CL=F', 'QQQ']
+    try:
+        df = yf.download(tickers, period='5y', progress=False)['Close']
+        df.columns = ['Oil', 'Gold', 'Dollar', 'SP500', 'QQQ', 'Tech', 'VIX', 'Yield']
+        
+        # 기술적 지표 계산
+        df['MA20'] = df['SP500'].rolling(20).mean()
+        df['MA60'] = df['SP500'].rolling(60).mean()
+        df['MA200'] = df['SP500'].rolling(200).mean()
+        
+        # RSI
+        delta = df['SP500'].diff()
+        up, down = delta.clip(lower=0), -1 * delta.clip(upper=0)
+        ema_up = up.ewm(com=13, adjust=False).mean()
+        ema_down = down.ewm(com=13, adjust=False).mean()
+        df['RSI'] = 100 - (100 / (1 + (ema_up / ema_down)))
+        
+        # MACD
+        df['MACD'] = df['SP500'].ewm(span=12).mean() - df['SP500'].ewm(span=26).mean()
+        
+        # 상대 강도 및 계절성 변수
+        df['Tech_Relative'] = df['Tech'] / df['SP500']
+        df['DayOfWeek'] = df.index.dayofweek
+        df['Month'] = df.index.month
+        
+        return df.dropna()
+    except Exception as e:
+        st.error(f"데이터 수집 중 오류 발생: {e}")
         return None
-        
-    df = df['Close']
-    df.columns = ['DXY_Yield', 'S&P500', 'VIX']
-    
-    # 지표 계산
-    df['MA20'] = df['S&P500'].rolling(20).mean()
-    df['MA60'] = df['S&P500'].rolling(60).mean()
-    
-    # RSI 계산 (오류 방지용)
-    delta = df['S&P500'].diff()
-    up = delta.clip(lower=0)
-    down = -1 * delta.clip(upper=0)
-    ema_up = up.ewm(com=13, adjust=False).mean()
-    ema_down = down.ewm(com=13, adjust=False).mean()
-    rs = ema_up / ema_down
-    df['RSI'] = 100 - (100 / (1 + rs))
-    
-    df['MACD'] = df['S&P500'].ewm(span=12).mean() - df['S&P500'].ewm(span=26).mean()
-    return df.dropna()
 
-# (앞부분 데이터 수집 로직은 동일)
-
+# 2. 최종 진화형 예측 로직
 def predict_market(df):
-    if df is None or len(df) < 100:
-        return None, None
+    if df is None or len(df) < 200: return None, None
         
-    df['Target'] = (df['S&P500'].shift(-1) > df['S&P500']).astype(int)
-    features = ['S&P500', 'VIX', 'DXY_Yield', 'MA20', 'MA60', 'RSI', 'MACD']
+    df['Target'] = (df['SP500'].shift(-1) > df['SP500']).astype(int)
+    features = ['SP500', 'VIX', 'Yield', 'Dollar', 'Tech', 'Gold', 'Oil', 'QQQ', 
+                'MA20', 'MA60', 'MA200', 'RSI', 'MACD', 'Tech_Relative', 'DayOfWeek', 'Month']
+    
     X = df[features].iloc[:-1]
     y = df['Target'].iloc[:-1]
     
-    model = RandomForestClassifier(n_estimators=200, random_state=42)
+    # 모델 고도화 (트리 개수 및 깊이 조정)
+    model = RandomForestClassifier(n_estimators=300, max_depth=15, random_state=42)
     model.fit(X, y)
     
     latest = df[features].tail(1)
     prob = model.predict_proba(latest)[0] # [Short 확률, Long 확률]
     
-    # --- 신뢰도 임계값 설정 ---
-    THRESHOLD = 0.60 # 60% 미만은 보합 처리
-    
-    if prob[1] >= THRESHOLD:
-        pred = 1 # 확실한 상승
-    elif prob[0] >= THRESHOLD:
-        pred = 0 # 확실한 하락
-    else:
-        pred = 2 # 보합 (Neutral)
+    # 신뢰도 기반 판정 (60% 미만은 보합)
+    THRESHOLD = 0.60
+    if prob[1] >= THRESHOLD: pred = 1
+    elif prob[0] >= THRESHOLD: pred = 0
+    else: pred = 2
         
     return pred, prob
 
-# 2. 이력 관리 로직 (한글 깨짐 및 파일 생성 오류 방지)
+# 3. 이력 관리 함수
 def update_history(date, pred, actual=None):
     file_name = 'history.csv'
-    # 데이터가 아예 없을 때를 대비한 기본 틀
     new_data = pd.DataFrame([[date, pred, actual]], columns=['날짜', '예측', '실제'])
-    
     if os.path.exists(file_name):
         try:
             history = pd.read_csv(file_name)
             if date in history['날짜'].values:
-                if actual is not None:
-                    history.loc[history['날짜'] == date, '실제'] = actual
-            else:
-                history = pd.concat([history, new_data], ignore_index=True)
-        except:
-            history = new_data
-    else:
-        history = new_data
-    
+                if actual is not None: history.loc[history['날짜'] == date, '실제'] = actual
+            else: history = pd.concat([history, new_data], ignore_index=True)
+        except: history = new_data
+    else: history = new_data
     history.to_csv(file_name, index=False, encoding='utf-8-sig')
-    return history
 
-# --- 메인 실행 로직 ---
+# --- 메인 실행 ---
 df = get_data()
-
-# --- 결과 출력 부분 수정 ---
 pred, prob = predict_market(df)
 
 if pred is not None:
-    if pred == 1:
-        result_text = "🚀 LONG (매수)"
-    elif pred == 0:
-        result_text = "📉 SHORT (매도/인버스)"
-    else:
-        result_text = "⚪ 보합 (관망/신호약함)"
+    today_str = now_kst.strftime('%Y-%m-%d')
+    update_history(today_str, pred)
     
-    confidence = max(prob) * 100
-    
-    # (이력 업데이트 및 스트림릿 출력 로직은 이전과 동일하게 유지)
-
     if current_hour == 7: # 아침 정산
         yesterday_str = (now_kst - timedelta(days=1)).strftime('%Y-%m-%d')
-        actual_val = 1 if df['S&P500'].iloc[-1] > df['S&P500'].iloc[-2] else 0
+        actual_val = 1 if df['SP500'].iloc[-1] > df['SP500'].iloc[-2] else 0
         update_history(yesterday_str, None, actual_val)
 
     # --- 스트림릿 UI ---
-    st.set_page_config(page_title="S&P 500 AI Trader", layout="wide")
-    st.title("📊 S&P 500 AI 성적표 & 리포트")
+    st.set_page_config(page_title="S&P 500 AI Trader V3", layout="wide")
+    st.title("🚀 S&P 500 AI 최종 진화형 리포트")
 
-    # --- 스트림릿 화면 구성 (이 부분으로 교체) ---
-if os.path.exists('history.csv'):
-    try:
-        # dropna()를 제거해서 데이터가 비어있어도 읽어오게 합니다.
-        h_df = pd.read_csv('history.csv')
-        
-        if not h_df.empty:
-            # 아직 결과가 없는 칸(NaN)을 '확인 중'으로 표시합니다.
-            display_df = h_df.tail(10).copy().fillna('-')
-            
-            # 승률 계산은 결과가 있는 데이터로만 합니다.
-            scored_df = h_df.dropna()
-            if not scored_df.empty:
-                scored_df['적중'] = (scored_df['예측'] == scored_df['실제']).astype(int)
-                win_rate = scored_df['적중'].mean() * 100
-                st.metric("AI 누적 정합성(승률)", f"{win_rate:.1f}%")
-            else:
-                st.metric("AI 누적 정합성(승률)", "측정 중...")
+    # 승률 및 최근 이력 표시
+    if os.path.exists('history.csv'):
+        h_df = pd.read_csv('history.csv').fillna('-')
+        scored_df = h_df[h_df['실제'] != '-']
+        if not scored_df.empty:
+            win_rate = (scored_df['예측'].astype(float) == scored_df['실제'].astype(float)).mean() * 100
+            st.metric("AI 누적 승률 (성적표)", f"{win_rate:.1f}%")
+        st.subheader("📅 최근 예측 이력")
+        st.table(h_df.tail(10))
 
-            st.subheader("📅 최근 예측 이력")
-            # 숫자를 보기 좋게 변환
-            display_df['예측'] = display_df['예측'].map({1: 'LONG', 0: 'SHORT', '-': '-'})
-            display_df['실제'] = display_df['실제'].map({1: 'LONG', 0: 'SHORT', '-': '-'})
-            st.table(display_df)
-    except Exception as e:
-        st.info("성적표를 생성하고 있습니다... (내일 아침 7시 첫 정산)")
-
+    # 현재 신호 및 종목 가이드
+    conf = max(prob) * 100
+    if pred == 1:
+        res_title = "🚀 LONG (매수)"
+        guide = "✅ 추천 종목: SPY (1배), UPRO (3배)"
+    elif pred == 0:
+        res_title = "📉 SHORT (인버스)"
+        guide = "✅ 추천 종목: SH (1배 인버스), SPXU (3배 인버스)"
+    else:
+        res_title = "⚪ 보합 (관망)"
+        guide = "✅ 추천 종목: 현금 보유 (진입 자제)"
 
     st.divider()
-    st.subheader(f"현재 예측: {result_text} (신뢰도 {max(prob)*100:.1f}%)")
-    
-    fig = go.Figure(data=[go.Candlestick(x=df.index[-60:], open=df['S&P500'][-60:], 
-                                        high=df['S&P500'][-60:], low=df['S&P500'][-60:], close=df['S&P500'][-60:])])
-    st.plotly_chart(fig, use_container_width=True)
+    if conf >= 70:
+        st.error(f"🔥 [강력 추천 - 비중 확대] {res_title}")
+    else:
+        st.success(f"🔔 [일반 신호] {res_title}")
+    st.info(f"신뢰도: {conf:.1f}% | {guide}")
 
-# 텔레그램 발송 로직 (Actions용)
-async def send_telegram(msg):
+# 텔레그램 발송 (메시지에 종목 가이드 포함)
+async def send_telegram(pred, prob):
     token = os.getenv('TELEGRAM_TOKEN')
     chat_id = os.getenv('CHAT_ID')
-    if token and chat_id:
-        bot = Bot(token=token)
-        await bot.send_message(chat_id=chat_id, text=msg)
+    if not (token and chat_id): return
+
+    conf = max(prob) * 100
+    is_strong = "🔥 [강력 추천 - 비중 확대]\n" if conf >= 70 else "🔔 [일반 신호]\n"
+    
+    if pred == 1:
+        msg = f"{is_strong}예측: 🚀 LONG (상승)\n신뢰도: {conf:.1f}%\n📍 추천: SPY(1배), UPRO(3배)"
+    elif pred == 0:
+        msg = f"{is_strong}예측: 📉 SHORT (하락)\n신뢰도: {conf:.1f}%\n📍 추천: SH(1배 인버스), SPXU(3배 인버스)"
+    else:
+        msg = f"🔔 [보합 관망]\n신뢰도: {conf:.1f}%\n📍 추천: 현금 보유"
+
+    bot = Bot(token=token)
+    await bot.send_message(chat_id=chat_id, text=msg)
 
 if __name__ == "__main__" and os.getenv('GITHUB_ACTIONS'):
     if pred is not None:
-        report_type = "모닝 성적표" if current_hour == 7 else "데일리 리포트"
-        msg = f"🔔 [{report_type}]\n결과: {result_text}\n신뢰도: {max(prob)*100:.1f}%"
-        asyncio.run(send_telegram(msg))
+        asyncio.run(send_telegram(pred, prob))
