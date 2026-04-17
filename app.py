@@ -144,8 +144,8 @@ async def run_trading_flow(pred, prob, df):
             status = "🚀 LONG(3x)" if pred == 1 else "📉 SHORT(3x)" if pred == 0 else "⚪ 보합"
             await bot.send_message(chat_id=chat_id, text=f"🎯 [새벽 1시 리포트]\n결정: {status}\n신뢰도: {conf:.1f}%\n주문: {exec_msg}")
 
-    # [2] 아침 7시: 전량 매도 및 성적 업데이트
-    elif current_hour == 7:
+    # [2] 아침 4시 50분: 전량 매도 및 성적 업데이트
+    elif current_hour == 4:
         sell_report = "📝 보유 종목 없음"
         holdings = trader.get_holdings()
         for stock in holdings:
