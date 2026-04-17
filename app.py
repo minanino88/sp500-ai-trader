@@ -4,56 +4,87 @@ import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 import streamlit as st
 import plotly.graph_objects as go
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 import os
 import asyncio
 from telegram import Bot
 
-# 1. 시간 설정 (한국 시간 기준)
+# 시간 및 환경 설정
 KST = pytz.timezone('Asia/Seoul')
 now_kst = datetime.now(KST)
 current_hour = now_kst.hour
 
-# 8시 실행인지 10시 실행인지 구분
-report_type = "1차 신호 (준비)" if current_hour < 21 else "최종 신호 (확정)"
-
-# 2. 데이터 수집 및 지표 계산
+# 1. 데이터 수집 및 예측 (기존 로직 유지)
 def get_data():
-    # S&P 500, VIX, 10년물 금리 가져오기
     tickers = ['^GSPC', '^VIX', '^TNX']
     df = yf.download(tickers, period='5y')['Close']
     df.columns = ['DXY_Yield', 'S&P500', 'VIX']
-    
-    # 기술적 지표 (20/60/120 이평선, RSI, MACD)
     df['MA20'] = df['S&P500'].rolling(20).mean()
     df['MA60'] = df['S&P500'].rolling(60).mean()
-    df['MA120'] = df['S&P500'].rolling(120).mean()
-    
-    delta = df['S&P500'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    df['RSI'] = 100 - (100 / (1 + gain/loss))
-    
+    df['RSI'] = 100 - (100 / (1 + df['S&P500'].diff().clip(lower=0).rolling(14).mean() / -df['S&P500'].diff().clip(upper=0).rolling(14).mean()))
     df['MACD'] = df['S&P500'].ewm(span=12).mean() - df['S&P500'].ewm(span=26).mean()
     return df.dropna()
 
-# 3. AI 모델 예측
 def predict_market(df):
     df['Target'] = (df['S&P500'].shift(-1) > df['S&P500']).astype(int)
-    features = ['S&P500', 'VIX', 'DXY_Yield', 'MA20', 'MA60', 'MA120', 'RSI', 'MACD']
+    features = ['S&P500', 'VIX', 'DXY_Yield', 'MA20', 'MA60', 'RSI', 'MACD']
     X = df[features].iloc[:-1]
     y = df['Target'].iloc[:-1]
-    
     model = RandomForestClassifier(n_estimators=200, random_state=42)
     model.fit(X, y)
-    
     latest = df[features].tail(1)
     pred = model.predict(latest)[0]
     prob = model.predict_proba(latest)[0]
     return pred, prob
 
-# 4. 텔레그램 메시지 전송
+# 2. 히스토리 기록 함수 (새로 추가)
+def update_history(date, pred, actual=None):
+    file_name = 'history.csv'
+    new_data = pd.DataFrame([[date, pred, actual]], columns=['Date', 'Pred', 'Actual'])
+    
+    if os.path.exists(file_name):
+        history = pd.read_csv(file_name)
+        # 이미 해당 날짜의 예측이 있다면 업데이트, 없으면 추가
+        if date in history['Date'].values:
+            if actual is not None:
+                history.loc[history['Date'] == date, 'Actual'] = actual
+        else:
+            history = pd.concat([history, new_data])
+    else:
+        history = new_data
+    history.to_csv(file_name, index=False)
+    return history
+
+# --- 실행 로직 ---
+df = get_data()
+pred, prob = predict_market(df)
+result_text = "🚀 LONG" if pred == 1 else "📉 SHORT"
+
+# 히스토리 업데이트 (예측 시점에 날짜와 예측값 저장)
+today_str = now_kst.strftime('%Y-%m-%d')
+history = update_history(today_str, pred)
+
+# 아침 7시 실행 시 결과 정산 (어제 종가 확인)
+if current_hour == 7:
+    yesterday_str = (now_kst - timedelta(days=1)).strftime('%Y-%m-%d')
+    # 어제 실제 지수 등락 확인 로직 (간소화)
+    actual_change = 1 if df['S&P500'].iloc[-1] > df['S&P500'].iloc[-2] else 0
+    history = update_history(yesterday_str, None, actual_change)
+
+# --- 스트림릿 화면 (성적표 추가) ---
+st.title("📊 S&P 500 AI 성적표 & 리포트")
+
+if os.path.exists('history.csv'):
+    h_df = pd.read_csv('history.csv').dropna()
+    if not h_df.empty:
+        h_df['Hit'] = (h_df['Pred'] == h_df['Actual']).astype(int)
+        win_rate = h_df['Hit'].mean() * 100
+        st.metric("AI 누적 정합성(승률)", f"{win_rate:.1f}%")
+        st.write("최근 10일 이력")
+        st.table(h_df.tail(10))
+
+# 텔레그램 발송 (아침 7시 성적표 전용)
 async def send_telegram(msg):
     token = os.getenv('TELEGRAM_TOKEN')
     chat_id = os.getenv('CHAT_ID')
@@ -61,27 +92,11 @@ async def send_telegram(msg):
         bot = Bot(token=token)
         await bot.send_message(chat_id=chat_id, text=msg)
 
-# 5. 실행 로직
-df = get_data()
-pred, prob = predict_market(df)
-result_text = "🚀 LONG (매수)" if pred == 1 else "📉 SHORT (매도/관망)"
-
-# --- Streamlit 화면 (브라우저 확인용) ---
-st.set_page_config(page_title=f"S&P 500 AI {report_type}", layout="wide")
-st.title(f"📈 S&P 500 AI {report_type}")
-st.subheader(f"결과: {result_text} (신뢰도 {max(prob)*100:.1f}%)")
-st.write(f"분석 시간: {now_kst.strftime('%Y-%m-%d %H:%M')}")
-
-fig = go.Figure(data=[go.Candlestick(x=df.index[-60:], open=df['S&P500'][-60:], high=df['S&P500'][-60:], low=df['S&P500'][-60:], close=df['S&P500'][-60:])])
-st.plotly_chart(fig, use_container_width=True)
-
-# --- 자동화 알림 (GitHub Actions 실행용) ---
 if __name__ == "__main__" and os.getenv('GITHUB_ACTIONS'):
-    message = (
-        f"🔔 [{report_type} 리포트]\n\n"
-        f"예측: {result_text}\n"
-        f"신뢰도: {max(prob)*100:.1f}%\n"
-        f"일시: {now_kst.strftime('%H:%M')} (KST)\n\n"
-        f"💡 8시와 10시 신호가 일치할 때 진입하세요!"
-    )
-    asyncio.run(send_telegram(message))
+    if current_hour == 7:
+        h_df = pd.read_csv('history.csv').dropna()
+        win_rate = (h_df['Pred'] == h_df['Actual']).mean() * 100
+        msg = f"☀️ [모닝 성적표]\n\n어제 예측 결과: {'적중' if h_df['Hit'].iloc[-1] == 1 else '실패'}\n누적 승률: {win_rate:.1f}%"
+    else:
+        msg = f"🔔 [데일리 리포트]\n\n예측: {result_text}\n신뢰도: {max(prob)*100:.1f}%"
+    asyncio.run(send_telegram(msg))
