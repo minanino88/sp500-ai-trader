@@ -142,7 +142,7 @@ async def run_trading_flow(pred, prob, df):
     conf, today_str = max(prob) * 100, now_kst.strftime('%Y-%m-%d')
     trader = KIS_Trader()
 
-    if current_hour == 1:
+    if current_hour == 2:
         exec_msg = "⚪ 조건 미달"
         update_history(today_str, pred)
         if conf >= 70 and pred != 2:
