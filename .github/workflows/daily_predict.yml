@@ -1,13 +1,15 @@
-name: S&P 500 Midnight Alpha
+name: SP500 Trend Following Bot
 
 on:
   schedule:
-    - cron: '0 16 * * *'  # 한국 시간 밤 1:00 (16:00 UTC) -> 메인 매수 신호 알람
-    - cron: '50 19 * * *'  # 한국 시간 아침 04:50 (22:00 UTC) -> 성적표 자동 정산 (무음)
-  workflow_dispatch:      # 언제든 수동으로 눌러볼 수 있는 버튼
+    # 1. 매수 판단 (KST 20:00 = UTC 11:00)
+    - cron: '0 11 * * 1-5'
+    # 2. 매도 정산 (KST 07:00 = UTC 22:00)
+    - cron: '0 22 * * 1-5'
+  workflow_dispatch:      # 수동 실행 버튼
 
 permissions:
-  contents: write         # 성적표(history.csv) 저장을 위해 꼭 필요
+  contents: write         # 매매 이력 저장을 위해 필수
 
 jobs:
   build:
@@ -23,19 +25,26 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
+          pip install yfinance pandas requests pytz python-telegram-bot
 
-      - name: Run AI Model
+      - name: Run Trading Bot
         env:
+          # 한국투자증권 API 키 (GitHub Secrets에 등록 필수)
+          KIS_APPKEY: ${{ secrets.KIS_APPKEY }}
+          KIS_SECRET: ${{ secrets.KIS_SECRET }}
+          KIS_CANO: ${{ secrets.KIS_CANO }}
+          KIS_ACNT_PRDT_CD: ${{ secrets.KIS_ACNT_PRDT_CD }}
+          # 텔레그램 알림 키
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
           GITHUB_ACTIONS: "true"
         run: python app.py
 
-      - name: Save History
+      - name: Save Trade History & State
         run: |
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
-          git add history.csv
-          git commit -m "Update history" || echo "No changes"
+          # 이력 파일과 상태 파일을 모두 추가
+          git add history_trend.csv trend_state.json || echo "No files to add"
+          git commit -m "Update trade history and trend state" || echo "No changes to commit"
           git push
