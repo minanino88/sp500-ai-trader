@@ -23,7 +23,7 @@ TICKER = 'SPY'
 STATE_FILE = 'trend_state.json'
 HISTORY_FILE = 'history_trend.csv'
 
-# 2. 한투 API 클래스 (기존과 동일)
+# 2. 한투 API 클래스
 class KIS_Trader:
     def __init__(self):
         self.base_url = "https://openapi.koreainvestment.com:9443"
@@ -77,15 +77,24 @@ class KIS_Trader:
             return requests.post(url, headers=headers, data=json.dumps(data)).json()
         except: return {"rt_cd": "1"}
 
-# 3. 판단 엔진
+# 3. 데이터 엔진
 def get_market_data():
-    spy = yf.download(TICKER, period='6mo', progress=False, auto_adjust=True)
-    if isinstance(spy.columns, pd.MultiIndex): spy.columns = spy.columns.get_level_values(0)
-    spy_close = spy['Close'].copy()
+    spy_raw = yf.download(TICKER, period='8mo', progress=False, auto_adjust=True)
+    vix_raw = yf.download('^VIX', period='8mo', progress=False, auto_adjust=True)
+    
+    if isinstance(spy_raw.columns, pd.MultiIndex): spy_raw.columns = spy_raw.columns.get_level_values(0)
+    if isinstance(vix_raw.columns, pd.MultiIndex): vix_raw.columns = vix_raw.columns.get_level_values(0)
+    
+    if spy_raw.empty: return pd.Series(), pd.Series(), pd.Series()
+        
+    spy_close = spy_raw['Close'].copy()
+    vix_close = vix_raw['Close'].copy()
     monthly = spy_close.resample('ME').last().pct_change().dropna()
-    return spy_close, monthly
+    return spy_close, monthly, vix_close
 
 def get_signal(spy_close, monthly):
+    if spy_close.empty or len(monthly) < 2:
+        return "WAIT", "데이터 수집 중...", 0.0, {"in_market": True, "last_exit_price": 0}
     recent_returns = monthly.tail(2).values
     consec_down = 0
     for ret in reversed(recent_returns):
@@ -104,72 +113,164 @@ def get_signal(spy_close, monthly):
         if rebound >= 0.02: return "RE-ENTER", f"2% 반등 확인 ({rebound*100:.1f}%)", current_price, state
         return "WAIT", f"반등 대기 중 ({rebound*100:.1f}%)", current_price, state
 
-# 4. 트레이딩 실행
+# 4. 트레이딩 로직
 async def run_trading():
-    spy_close, monthly = get_market_data()
+    spy_close, monthly, vix_close = get_market_data()
+    if spy_close.empty: return
     signal, reason, price, state = get_signal(spy_close, monthly)
     trader = KIS_Trader()
     bot = Bot(token=os.getenv('TELEGRAM_TOKEN'))
     chat_id = os.getenv('CHAT_ID')
 
-    if current_hour == 20: # 저녁 8시 매수
+    if current_hour == 20:
         exec_msg = "관망"
         if signal in ["KEEP", "RE-ENTER"]:
             balance = trader.get_balance()
             cur_p = trader.get_current_price()
-            qty = int((balance * 0.95) / cur_p)
-            if qty >= 1:
-                res = trader.send_order(TICKER, qty, "BUY")
-                if res.get('rt_cd') == '0': exec_msg = f"✅ 매수 완료 ({qty}주)"
-                with open(STATE_FILE, 'w') as f: json.dump({"in_market": True, "last_exit_price": 0}, f)
+            if cur_p > 0:
+                qty = int((balance * 0.95) / cur_p)
+                if qty >= 1:
+                    res = trader.send_order(TICKER, qty, "BUY")
+                    if res.get('rt_cd') == '0': exec_msg = f"매수 완료 ({qty}주)"
+                    with open(STATE_FILE, 'w') as f: json.dump({"in_market": True, "last_exit_price": 0}, f)
         elif signal == "EXIT":
             holdings = trader.get_holdings()
             for stock in holdings:
                 if stock.get('pdno') == TICKER:
                     qty = int(stock.get('ccld_qty_smtl', 0))
                     trader.send_order(TICKER, qty, "SELL")
-                    exec_msg = f"⚠️ 하락 추세 전량 매도"
+                    exec_msg = f"전량 매도"
             with open(STATE_FILE, 'w') as f: json.dump({"in_market": False, "last_exit_price": price}, f)
-        await bot.send_message(chat_id=chat_id, text=f"📊 [20:00 리포트]\n결정: {signal}\n실행: {exec_msg}")
+        if bot: await bot.send_message(chat_id=chat_id, text=f"📊 [20:00 리포트]\n결정: {signal}\n실행: {exec_msg}")
 
-    elif current_hour == 7: # 아침 7시 매도
+    elif current_hour == 7:
         holdings = trader.get_holdings()
         for stock in holdings:
             if stock.get('pdno') == TICKER:
                 qty = int(stock.get('ccld_qty_smtl', 0))
                 trader.send_order(TICKER, qty, "SELL")
-        await bot.send_message(chat_id=chat_id, text=f"☀️ [07:00 매도 정산]\n오버나잇 수익 실현")
+        if bot: await bot.send_message(chat_id=chat_id, text=f"☀️ [07:00 매도 정산] 완료")
 
-# 5. 스트림릿 대시보드
+# 5. [수정됨] 개선된 스트림릿 대시보드
 def run_dashboard():
-    st.set_page_config(page_title="SP500 추세추종", layout="wide")
-    st.title("🛡️ SP500 추세추종 상황실")
-    try:
-        spy_close, monthly = get_market_data()
-        signal, reason, price, state = get_signal(spy_close, monthly)
-        c1, c2, c3 = st.columns(3)
-        c1.metric("현재 포지션", "시장 진입(IN)" if state['in_market'] else "현금 보유(OUT)")
-        c2.metric("최신 신호", signal)
-        c3.metric("SPY 현재가", f"${price:,.2f}")
-        st.info(f"💡 판단 근거: {reason}")
-        
-        st.subheader("📈 최근 6개월 흐름")
-        fig = make_subplots(rows=2, cols=1, row_heights=[0.7, 0.3], shared_xaxes=True)
-        fig.add_trace(go.Scatter(x=spy_close.index, y=spy_close.values, name="SPY", line=dict(color='#00FF00')), row=1, col=1)
-        vix = yf.download('^VIX', period='6mo', progress=False, auto_adjust=True)['Close']
-        fig.add_trace(go.Bar(x=vix.index, y=vix, name="VIX", marker_color='red'), row=2, col=1)
-        fig.update_layout(template='plotly_dark', height=500, margin=dict(l=10,r=10,t=10,b=10))
-        st.plotly_chart(fig, use_container_width=True)
-    except Exception as e:
-        st.error(f"데이터를 불러오는 중입니다... (잠시만 기다려주세요)\n에러내용: {e}")
+    st.set_page_config(page_title="SP500 추세추종 상황실", layout="wide")
 
-# ==========================================
-# 6. 메인 실행 입구 (여기가 수정됨!)
-# ==========================================
+    # (1) 커스텀 CSS
+    st.markdown("""
+    <style>
+      .main { background-color: #0d1117; }
+      .metric-card {
+        background: #161b22;
+        border: 1px solid #30363d;
+        border-radius: 12px;
+        padding: 16px;
+        text-align: center;
+      }
+      .signal-badge {
+        display: inline-block;
+        padding: 4px 12px;
+        border-radius: 20px;
+        font-weight: bold;
+        font-size: 1.1rem;
+      }
+    </style>
+    """, unsafe_allow_html=True)
+
+    # 데이터 로드
+    spy_close, monthly, vix_close = get_market_data()
+    if spy_close.empty:
+        st.error("데이터 로딩 실패")
+        return
+    
+    signal, reason, price, state = get_signal(spy_close, monthly)
+    ohlc = yf.download(TICKER, period='6mo', progress=False, auto_adjust=True)
+    if isinstance(ohlc.columns, pd.MultiIndex): ohlc.columns = ohlc.columns.get_level_values(0)
+
+    # (5) 사이드바 추가
+    st.sidebar.title("설정")
+    st.sidebar.metric("연속 하락 기준", "2개월")
+    st.sidebar.metric("재진입 반등 기준", "2%")
+    st.sidebar.metric("포지션 크기", "95%")
+    if st.sidebar.button("수동 신호 새로고침"):
+        st.rerun()
+
+    st.title("🛡️ SP500 Trend Following Dashboard")
+
+    # (2) 상단 지표 카드 5개
+    c1, c2, c3, c4, c5 = st.columns(5)
+    with c1:
+        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+        st.metric("현재 포지션", "IN" if state.get('in_market') else "OUT")
+        st.markdown('</div>', unsafe_allow_html=True)
+    with c2:
+        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+        st.metric("신호", signal)
+        st.markdown('</div>', unsafe_allow_html=True)
+    with c3:
+        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+        st.metric("SPY 현재가", f"${price:.2f}")
+        st.markdown('</div>', unsafe_allow_html=True)
+    with c4:
+        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+        m_ret = monthly.iloc[-1] * 100 if not monthly.empty else 0
+        st.metric("이번달 수익률", f"{m_ret:+.2f}%")
+        st.markdown('</div>', unsafe_allow_html=True)
+    with c5:
+        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+        vix_val = vix_close.iloc[-1] if not vix_close.empty else 0
+        st.metric("VIX 현재값", f"{vix_val:.2f}")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    st.info(f"💡 판단 근거: {reason}")
+
+    # (3) 차트 3개 서브플롯
+    fig = make_subplots(rows=3, cols=1, row_heights=[0.5, 0.25, 0.25], 
+                        shared_xaxes=True, vertical_spacing=0.05)
+    
+    # Row 1: OHLC Candlestick
+    fig.add_trace(go.Candlestick(
+        x=ohlc.index, open=ohlc['Open'], high=ohlc['High'], low=ohlc['Low'], close=ohlc['Close'],
+        name='SPY OHLC', increasing_line_color='#3fb950', decreasing_line_color='#f85149'
+    ), row=1, col=1)
+
+    # Row 2: VIX Bar with Dynamic Colors
+    vix_data = vix_close.tail(120)
+    vix_colors = ['#f85149' if v > 25 else '#d29922' if v > 18 else '#3fb950' for v in vix_data.values]
+    fig.add_trace(go.Bar(x=vix_data.index, y=vix_data.values, name='VIX', marker_color=vix_colors), row=2, col=1)
+
+    # Row 3: Volume Bar
+    fig.add_trace(go.Bar(x=ohlc.index, y=ohlc['Volume'], name='Volume', marker_color='#58a6ff', opacity=0.7), row=3, col=1)
+
+    fig.update_layout(template='plotly_dark', height=600, xaxis_rangeslider_visible=False,
+                      margin=dict(l=10, r=10, t=30, b=10))
+    st.plotly_chart(fig, use_container_width=True)
+
+    # (4) 월별 수익률 바 차트
+    st.subheader("Monthly Returns (Last 12 Months)")
+    m_data = monthly.tail(12)
+    m_colors = ['#3fb950' if v > 0 else '#f85149' for v in m_data.values]
+    m_fig = go.Figure(go.Bar(
+        x=m_data.index.strftime('%y/%m'), y=m_data.values * 100,
+        marker_color=m_colors
+    ))
+    m_fig.update_layout(template='plotly_dark', height=200, margin=dict(l=10, r=10, t=10, b=10))
+    st.plotly_chart(m_fig, use_container_width=True)
+
+    # (6) 거래 이력 테이블 스타일링
+    st.subheader("Trade History")
+    if os.path.exists(HISTORY_FILE):
+        df_hist = pd.read_csv(HISTORY_FILE)
+        def style_row(row):
+            if row['signal'] == 'EXIT': return ['background-color: #441111'] * len(row)
+            if row['signal'] == 'RE-ENTER': return ['background-color: #114411'] * len(row)
+            return [''] * len(row)
+        st.dataframe(df_hist.style.apply(style_row, axis=1), use_container_width=True)
+    else:
+        st.write("No history found.")
+
+# 6. 메인 입구
 if __name__ == "__main__":
-    # 깃허브 액션 환경이면 트레이딩 실행
     if os.getenv('GITHUB_ACTIONS') == 'true':
         asyncio.run(run_trading())
-    # 그 외 모든 상황(스트림릿 클라우드 포함)에서는 대시보드 실행
     else:
         run_dashboard()
