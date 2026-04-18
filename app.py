@@ -196,7 +196,10 @@ def run_dashboard():
 
 if __name__ == "__main__":
     import sys
-    if len(sys.argv) > 1 and sys.argv[1] == 'dashboard':
+    # 스트림릿으로 실행 중이면 무조건 대시보드를 띄웁니다.
+    if any("streamlit" in arg for arg in sys.argv):
         run_dashboard()
+    # 그 외(깃허브 액션 등)에는 트레이딩 로직을 실행합니다.
     else:
         asyncio.run(run_trading())
+
