@@ -2,14 +2,12 @@ name: SP500 Trend Following Bot
 
 on:
   schedule:
-    # 1. 매수 판단 (KST 20:00 = UTC 11:00)
-    - cron: '0 11 * * 1-5'
-    # 2. 매도 정산 (KST 07:00 = UTC 22:00)
-    - cron: '0 22 * * 1-5'
-  workflow_dispatch:      # 수동 실행 버튼
+    - cron: '0 11 * * 1-5'  # KST 20:00
+    - cron: '0 22 * * 1-5'  # KST 07:00
+  workflow_dispatch:
 
 permissions:
-  contents: write         # 매매 이력 저장을 위해 필수
+  contents: write
 
 jobs:
   build:
@@ -25,16 +23,15 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install yfinance pandas requests pytz python-telegram-bot
+          # 필요한 모든 라이브러리를 한꺼번에 설치합니다.
+          pip install yfinance pandas numpy requests pytz python-telegram-bot streamlit plotly
 
       - name: Run Trading Bot
         env:
-          # 한국투자증권 API 키 (GitHub Secrets에 등록 필수)
           KIS_APPKEY: ${{ secrets.KIS_APPKEY }}
           KIS_SECRET: ${{ secrets.KIS_SECRET }}
           KIS_CANO: ${{ secrets.KIS_CANO }}
           KIS_ACNT_PRDT_CD: ${{ secrets.KIS_ACNT_PRDT_CD }}
-          # 텔레그램 알림 키
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
           GITHUB_ACTIONS: "true"
@@ -44,7 +41,6 @@ jobs:
         run: |
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
-          # 이력 파일과 상태 파일을 모두 추가
           git add history_trend.csv trend_state.json || echo "No files to add"
           git commit -m "Update trade history and trend state" || echo "No changes to commit"
           git push
