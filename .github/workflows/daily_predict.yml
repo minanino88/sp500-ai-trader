@@ -27,7 +27,8 @@ jobs:
       - name: Install dependencies
         run: |
           # 필요한 모든 라이브러리를 한꺼번에 설치합니다.
-          pip install yfinance pandas numpy requests pytz python-telegram-bot streamlit plotly
+          # Install dependencies 부분을
+          pip install yfinance pandas numpy requests pytz python-telegram-bot>=20.0 streamlit plotly
 
       - name: Run Trading Bot
         env:
