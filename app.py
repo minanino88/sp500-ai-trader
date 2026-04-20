@@ -30,7 +30,7 @@ STATE_FILE = 'trend_state.json'
 HISTORY_FILE = 'history_trend.csv'
 
 # ==========================================
-# [체크리스트 2] KIS API 클래스 (시세 URL 및 tr_id 수정)
+# [체크리스트 2] KIS API 클래스 (주소 체계 교정)
 # ==========================================
 class KIS_Trader:
     def __init__(self):
@@ -46,7 +46,6 @@ class KIS_Trader:
     def _set_token(self):
         try:
             url = f"{self.base_url}/oauth2/tokenP"
-            # [규격] appsecret 이름표 고정
             data = {"grant_type": "client_credentials", "appkey": self.app_key, "appsecret": self.app_secret}
             res = requests.post(url, headers={"content-type": "application/json"}, data=json.dumps(data))
             res_data = res.json()
@@ -78,11 +77,11 @@ class KIS_Trader:
             return 0
         except: return 0
 
-    # [수정] URL: inquire-price / tr_id: HHDFS00000300 (민환님 분석 반영)
+    # [수정] URL Path: overseas-price / tr_id: HHDFS00000300 (민환님 공식문서 확인 결과 반영)
     def get_current_price(self, ticker=TRADE_TICKER):
         if not self.token: return 0.0
         try:
-            url = f"{self.base_url}/uapi/overseas-stock/v1/quotations/inquire-price"
+            url = f"{self.base_url}/uapi/overseas-price/v1/quotations/price"
             headers = {"Content-Type":"application/json", "authorization":f"Bearer {self.token}", "appkey":self.app_key, "appsecret":self.app_secret, "tr_id":"HHDFS00000300"}
             for excd in ["NYS", "NAS", "AMS"]:
                 response = requests.get(url, headers=headers, params={"AUTH": "", "EXCD": excd, "PDNO": ticker})
@@ -157,7 +156,7 @@ async def run_trading():
     token = os.getenv('TELEGRAM_TOKEN'); chat_id = os.getenv('CHAT_ID')
     bot = Bot(token=token) if (Bot and token) else None
     
-    # [민환님 테스트 가이드] 현재 밤 11시 45분이므로 23시 개방 유지
+    # [민환님 가이드] 현재 시간 23시 개방 유지
     if current_hour == 23: 
         spy_ohlc, monthly, vix_close, msg = get_market_data()
         if spy_ohlc.empty:
@@ -170,10 +169,10 @@ async def run_trading():
         bal = trader.get_balance()
         if bot: await bot.send_message(chat_id=chat_id, text=f"🔍 BAL_DEBUG: {bal:.2f} USD 확인")
 
-        # [2] 가격 디버그 스캔 루프 (URL 및 tr_id 수정 반영)
+        # [2] 가격 디버그 스캔 루프 (overseas-price 수정 반영)
         cur_p = 0.0
         for excd in ["NYS", "NAS", "AMS"]:
-            url_p = f"{trader.base_url}/uapi/overseas-stock/v1/quotations/inquire-price" # [수정]
+            url_p = f"{trader.base_url}/uapi/overseas-price/v1/quotations/price" # [수정]
             response = requests.get(
                 url_p,
                 headers={
@@ -181,7 +180,7 @@ async def run_trading():
                     "authorization":f"Bearer {trader.token}", 
                     "appkey":trader.app_key, 
                     "appsecret":trader.app_secret, 
-                    "tr_id":"HHDFS00000300" # [수정]
+                    "tr_id":"HHDFS00000300"
                 },
                 params={"AUTH":"", "EXCD":excd, "PDNO":TRADE_TICKER}
             )
@@ -219,13 +218,13 @@ async def run_trading():
                 with open(STATE_FILE, 'w') as f: json.dump({"in_market": False, "last_exit_price": price}, f)
             else: exec_status = f" | ❌ 매도실패: {res.get('rt_msg')}"
 
-        # 최종 디버그 보고
+        # [체크리스트 4] 최종 디버그 인포
         token_status = "OK" if trader.token else "FAIL"
         debug_info = f"\nqty={qty} | bal={bal:.1f} | price={cur_p:.2f} | token={token_status}"
         if bot: await bot.send_message(chat_id=chat_id, text=f"[20:00] {signal}: {reason}{exec_status}{debug_info}")
 
     elif current_hour == 1:
-        # [체크리스트 2] 01:00 탈출 로직 완비
+        # [체크리스트 2] 01:00 탈출 엔진 완비
         spy_int = yf.download(SIGNAL_TICKER, period='1d', interval='5m', progress=False)
         if not spy_int.empty:
             spy_ret = (float(spy_int['Close'].iloc[-1]) / float(spy_int['Open'].iloc[0])) - 1
@@ -241,8 +240,8 @@ async def run_trading():
 # ==========================================
 def run_dashboard():
     now_kst = dt.now(KST)
-    st.set_page_config(page_title="SP500 Watchtower v3.2.9", layout="wide")
-    st.sidebar.title("v3.2.9 Master")
+    st.set_page_config(page_title="SP500 Watchtower v3.3.0", layout="wide")
+    st.sidebar.title("v3.3.0 Master")
     st.sidebar.caption(f"Update: {now_kst.strftime('%H:%M:%S')} KST")
     st.sidebar.divider()
     st.sidebar.write("**EXIT:** VIX+30%, SPY-3%, 3d-5%, 2m Down")
