@@ -30,7 +30,7 @@ STATE_FILE = 'trend_state.json'
 HISTORY_FILE = 'history_trend.csv'
 
 # ==========================================
-# [체크리스트 2] KIS API 클래스 (주문 엔진 고도화)
+# [체크리스트 2] KIS API 클래스 (주문 수량 소수점 원천 차단)
 # ==========================================
 class KIS_Trader:
     def __init__(self):
@@ -71,16 +71,15 @@ class KIS_Trader:
             params = {"CANO":self.cano, "ACNT_PRDT_CD":self.acnt_prdt_cd, "OVRS_EXCG_CD":"AMEX", "TR_CRCY_CD":"USD", "CTX_AREA_FK200":"", "CTX_AREA_NK200":""}
             res = requests.get(url, headers=headers, params=params)
             for item in res.json().get('output1', []):
-                if item.get('pdno') == ticker: return int(item.get('ccld_qty_smtl', 0))
+                if item.get('pdno') == ticker: return int(float(item.get('ccld_qty_smtl', 0)))
             return 0
         except: return 0
 
     def get_current_price(self, ticker=TRADE_TICKER):
         try:
-            # rt=2 오류 방지를 위한 yfinance 핀포인트 가격 조회
-            data = yf.download(ticker, period='1d', interval='1m', progress=False)
-            if not data.empty:
-                return float(data['Close'].iloc[-1])
+            # rt=2 오류 방지를 위한 100% 가동 엔진 yfinance
+            df = yf.download(ticker, period='1d', interval='1m', progress=False)
+            if not df.empty: return float(df['Close'].iloc[-1])
             return 0.0
         except: return 0.0
 
@@ -90,12 +89,25 @@ class KIS_Trader:
             url = f"{self.base_url}/uapi/overseas-stock/v1/trading/order"
             tr_id = "JTTT1002U" if side == "BUY" else "JTTT1006U"
             headers = {"Content-Type":"application/json", "authorization":f"Bearer {self.token}", "appkey":self.app_key, "appsecret":self.app_secret, "tr_id":tr_id, "custtype":"P"}
-            data = {"CANO":self.cano, "ACNT_PRDT_CD":self.acnt_prdt_cd, "OVRS_EXGI":"AMEX", "PDNO":ticker, "ORD_QTY":str(qty), "ORD_DVP":"00", "ORD_UNPR":"0"}
+            
+            # [핵심 교정] 수량에서 소수점을 물리적으로 제거 (f-string int 캐스팅)
+            clean_qty = f"{int(float(qty))}"
+            
+            # UPRO(Arca) 주문을 위한 표준 거래소 코드 NYSE 적용
+            data = {
+                "CANO": self.cano, 
+                "ACNT_PRDT_CD": self.acnt_prdt_cd, 
+                "OVRS_EXGI": "NYSE", 
+                "PDNO": ticker, 
+                "ORD_QTY": clean_qty, 
+                "ORD_DVP": "00", 
+                "ORD_UNPR": "0" # 시장가 주문
+            }
             return requests.post(url, headers=headers, data=json.dumps(data)).json()
-        except: return {"rt_cd": "1", "rt_msg": "Network Error"}
+        except Exception as e: return {"rt_cd": "1", "rt_msg": str(e)}
 
 # ==========================================
-# [체크리스트 3, 12, 13, 15] 데이터 및 지능형 엔진
+# [체크리스트 3, 12, 13, 15] 데이터 및 지능형 엔진 (전수 유지)
 # ==========================================
 def get_market_data():
     try:
@@ -115,13 +127,11 @@ def get_signal(spy_close, monthly, vix_close):
     else: state = {"in_market": True, "last_exit_price": 0}
     
     if spy_close.empty or len(spy_close) < 20: return "WAIT", "Loading", 0.0, state
-    
     curr_p = float(spy_close.iloc[-1])
     spy_daily_ret = (spy_close.iloc[-1] / spy_close.iloc[-2]) - 1
     vix_daily_ret = (vix_close.iloc[-1] / vix_close.iloc[-2]) - 1
     spy_3day_ret = (spy_close.iloc[-1] / spy_close.iloc[-4]) - 1 if len(spy_close) >= 4 else 0.0
     
-    # [마스터 체크리스트 4] 매도/매수 시그널
     if vix_daily_ret >= 0.3: return "EXIT", "VIX Spike", curr_p, state
     if spy_daily_ret <= -0.03: return "EXIT", "SPY Shock", curr_p, state
     if spy_3day_ret <= -0.05: return "EXIT", "3d Cum Down", curr_p, state
@@ -135,7 +145,6 @@ def get_signal(spy_close, monthly, vix_close):
         vix_now, vix_prev = float(vix_close.iloc[-1]), float(vix_close.iloc[-2])
         vix_20d = vix_close.tail(20)
         vix_rev = (vix_now > (vix_20d.mean() + 2*vix_20d.std()) or vix_prev > (vix_20d.mean() + 2*vix_20d.std())) and (vix_now < vix_prev * 0.95) and (spy_daily_ret > 0)
-        
         if vix_rev: return "RE-ENTER", "VIX Reversal", curr_p, state
         if rebound >= 0.02: return "RE-ENTER", "2% Rebound", curr_p, state
         return "WAIT", f"Waiting({rebound*100:.1f}%)", curr_p, state
@@ -150,13 +159,13 @@ async def run_trading():
     token_val = os.getenv('TELEGRAM_TOKEN'); chat_id = os.getenv('CHAT_ID')
     bot = Bot(token=token_val) if (Bot and token_val) else None
     
-    # [테스트 대응] 현재 KST 00시이므로 개방
+    # [테스트 대응] 현재 KST 00시 가동 개방
     if current_hour == 0: 
         spy_ohlc, monthly, vix_close, msg = get_market_data()
         if spy_ohlc.empty: return
         signal, reason, price_val, state = get_signal(spy_ohlc['Close'], monthly, vix_close)
         bal = trader.get_balance()
-        cur_p = trader.get_current_price(TRADE_TICKER) # yfinance 엔진
+        cur_p = trader.get_current_price(TRADE_TICKER)
         qty = trader.get_holdings(TRADE_TICKER)
         
         if bot: 
@@ -171,10 +180,10 @@ async def run_trading():
                 if res_ord.get('rt_cd') == '0':
                     exec_status = f" | ✅ 매수성공: {buy_qty}주"
                     with open(STATE_FILE, 'w') as f: json.dump({"in_market": True, "last_exit_price": 0}, f)
-                    # [체크리스트 13] 히스토리 로깅
                     log_entry = {"Date": now_kst.strftime("%Y-%m-%d %H:%M"), "Action": "BUY", "Qty": buy_qty, "Price": cur_p}
                     pd.DataFrame([log_entry]).to_csv(HISTORY_FILE, mode='a', header=not os.path.exists(HISTORY_FILE), index=False)
                 else: exec_status = f" | ❌ 매수실패: {res_ord.get('rt_msg')}"
+            else: exec_status = f" | ⚠️ 수량부족"
         elif signal == "EXIT" and qty > 0:
             res_ord = trader.send_order(TRADE_TICKER, qty, "SELL")
             if res_ord.get('rt_cd') == '0':
@@ -186,7 +195,7 @@ async def run_trading():
         if bot: await bot.send_message(chat_id=chat_id, text=f"[{now_kst.strftime('%H:%M')}] {signal}: {reason}{exec_status}")
 
     elif current_hour == 1:
-        # [마스터 체크리스트 2] 01:00 폭락 대응 비상 매도
+        # [체크리스트 2] 01:00 폭락 대응 비상 매도
         spy_int = yf.download(SIGNAL_TICKER, period='1d', interval='5m', progress=False)
         if not spy_int.empty:
             spy_ret = (float(spy_int['Close'].iloc[-1]) / float(spy_int['Open'].iloc[0])) - 1
@@ -202,18 +211,15 @@ async def run_trading():
 # ==========================================
 def run_dashboard():
     now_kst = dt.now(KST)
-    st.set_page_config(page_title="SP500 Watchtower v3.4.4", layout="wide")
-    st.sidebar.title("v3.4.4 Final Master")
-    st.sidebar.caption(f"Last Update: {now_kst.strftime('%H:%M:%S')} KST")
+    st.set_page_config(page_title="SP500 Watchtower v3.4.5", layout="wide")
+    st.sidebar.title("v3.4.5 Master")
     st.sidebar.divider()
     st.sidebar.write("**EXIT:** VIX Spike, SPY -3%, 3d -5%, 2m Down")
     st.sidebar.write("**ENTER:** VIX Reversal, 2% Rebound")
 
     st.title(f"🛡️ {TRADE_TICKER} Watchtower")
-    
     spy_ohlc, monthly, vix_close, msg = get_market_data()
     if spy_ohlc.empty: st.error(f"❌ 데이터 로드 실패: {msg}"); return
-    
     signal, reason, price, state = get_signal(spy_ohlc['Close'], monthly, vix_close)
     
     # [체크리스트 6] 5개 메트릭 카드
@@ -268,13 +274,8 @@ def run_dashboard():
     c_fig = go.Figure()
     c_fig.add_trace(go.Scatter(x=['22-01']+dates, y=st_hist, name='Strategy', line=dict(color='#3fb950', width=2)))
     c_fig.add_trace(go.Scatter(x=['22-01']+dates, y=bh_hist, name='SPY B&H', line=dict(color='gray', dash='dash')))
-    c_fig.update_layout(template='plotly_dark', height=300, margin=dict(l=10,r=10,t=10,b=10), yaxis_title="Portfolio (Base 100)")
+    c_fig.update_layout(template='plotly_dark', height=300, margin=dict(l=10,r=10,t=10,b=10), yaxis_title="Equity (Base 100)")
     st.plotly_chart(c_fig, use_container_width=True)
-
-    # [체크리스트 10, 11] 상세 로그
-    with st.expander("Strategy Performance Details"):
-        st.write(f"### 📈 Total Return: {(st_hist[-1]-100):.1f}%")
-        st.write("Strategy: Exit on 2m down, 3% daily drop, 5% 3-day drop. VIX spike exit.")
 
     if os.path.exists(HISTORY_FILE):
         st.subheader("📋 Trade History Logs")
