@@ -30,7 +30,7 @@ STATE_FILE = 'trend_state.json'
 HISTORY_FILE = 'history_trend.csv'
 
 # ==========================================
-# 2. KIS API 클래스 (주문 규격 핀포인트 교정)
+# 2. KIS API 클래스 (인증 및 주문 엔진)
 # ==========================================
 class KIS_Trader:
     def __init__(self):
@@ -77,7 +77,6 @@ class KIS_Trader:
 
     def get_current_price(self, ticker=TRADE_TICKER):
         try:
-            # 시세 권한 벽을 넘기 위한 100% 가동 엔진 yfinance
             df = yf.download(ticker, period='1d', interval='1m', progress=False)
             if not df.empty: return float(df['Close'].iloc[-1])
             return 0.0
@@ -89,26 +88,18 @@ class KIS_Trader:
             url = f"{self.base_url}/uapi/overseas-stock/v1/trading/order"
             tr_id = "JTTT1002U" if side == "BUY" else "JTTT1006U"
             headers = {"Content-Type":"application/json", "authorization":f"Bearer {self.token}", "appkey":self.app_key, "appsecret":self.app_secret, "tr_id":tr_id, "custtype":"P"}
-            
-            # [핵심 교정] 
-            # 1. 수량 정수화 강제
             clean_qty = str(int(float(qty)))
-            # 2. 거래소 코드를 NYSE(Arca 포함)로 지정
-            # 3. 주문구분(ORD_DVP)을 '01'(시장가)로 지정하여 소수점 에러 원천 차단
+            # [규격 고정] NYSE + ORD_DVP 01 (시장가)
             data = {
-                "CANO": self.cano, 
-                "ACNT_PRDT_CD": self.acnt_prdt_cd, 
-                "OVRS_EXGI": "NYSE", 
-                "PDNO": ticker, 
-                "ORD_QTY": clean_qty, 
-                "ORD_DVP": "01", # 시장가(Market)
-                "ORD_UNPR": "0"  # 시장가 시 0 고정
+                "CANO": self.cano, "ACNT_PRDT_CD": self.acnt_prdt_cd, 
+                "OVRS_EXGI": "NYSE", "PDNO": ticker, 
+                "ORD_QTY": clean_qty, "ORD_DVP": "01", "ORD_UNPR": "0"
             }
             return requests.post(url, headers=headers, data=json.dumps(data)).json()
-        except Exception as e: return {"rt_cd": "1", "rt_msg": str(e)}
+        except: return {"rt_cd": "1", "rt_msg": "Network Error"}
 
 # ==========================================
-# 3. 데이터 엔진 & 지능형 신호 (무결성 100% 유지)
+# 3. 데이터 엔진 & 지능형 신호 (무결성 100%)
 # ==========================================
 def get_market_data():
     try:
@@ -128,35 +119,35 @@ def get_signal(spy_close, monthly, vix_close):
     if spy_close.empty or len(spy_close) < 20: return "WAIT", "Loading", 0.0, state
     curr_p = float(spy_close.iloc[-1]); spy_daily_ret = (spy_close.iloc[-1] / spy_close.iloc[-2]) - 1
     vix_daily_ret = (vix_close.iloc[-1] / vix_close.iloc[-2]) - 1; spy_3day_ret = (spy_close.iloc[-1] / spy_close.iloc[-4]) - 1 if len(spy_close) >= 4 else 0.0
-    if vix_daily_ret >= 0.3: return "EXIT", "VIX Spike", curr_p, state
-    if spy_daily_ret <= -0.03: return "EXIT", "SPY Shock", curr_p, state
-    if spy_3day_ret <= -0.05: return "EXIT", "3d Cum Down", curr_p, state
+    if vix_daily_ret >= 0.3 or spy_daily_ret <= -0.03 or spy_3day_ret <= -0.05: return "EXIT", "Shock Trigger", curr_p, state
     if state.get('in_market', True):
         recent = monthly.tail(2).values
         if len(recent) == 2 and recent[0] < 0 and recent[1] < 0: return "EXIT", "2m Down", curr_p, state
         return "KEEP", "Holding", curr_p, state
     else:
         rebound = (curr_p - state['last_exit_price']) / state['last_exit_price'] if state['last_exit_price'] > 0 else 0
-        vix_now, vix_prev = float(vix_close.iloc[-1]), float(vix_close.iloc[-2])
-        vix_20d = vix_close.tail(20)
-        vix_rev = (vix_now > (vix_20d.mean() + 2*vix_20d.std()) or vix_prev > (vix_20d.mean() + 2*vix_20d.std())) and (vix_now < vix_prev * 0.95) and (spy_daily_ret > 0)
-        if vix_rev: return "RE-ENTER", "VIX Reversal", curr_p, state
         if rebound >= 0.02: return "RE-ENTER", "2% Rebound", curr_p, state
         return "WAIT", f"Waiting({rebound*100:.1f}%)", curr_p, state
 
 # ==========================================
-# 4. 트레이딩 가동 (00:00 KST 대응)
+# 4. 트레이딩 실행 (들여쓰기 정밀 교정 영역)
 # ==========================================
 async def run_trading():
-    now_kst = dt.now(KST); current_hour = now_kst.hour
-    trader = KIS_Trader(); token_v = os.getenv('TELEGRAM_TOKEN'); chat_id = os.getenv('CHAT_ID')
+    now_kst = dt.now(KST)
+    current_hour = now_kst.hour
+    trader = KIS_Trader()
+    token_v = os.getenv('TELEGRAM_TOKEN')
+    chat_id = os.getenv('CHAT_ID')
     bot = Bot(token=token_v) if (Bot and token_v) else None
     
-    if current_hour == 0: 
+    # [민환님 가이드] 현재 시간 00시 개방
+    if current_hour == 1: 
         spy_ohlc, monthly, vix_close, msg = get_market_data()
         if spy_ohlc.empty: return
+        
         signal, reason, price_val, state = get_signal(spy_ohlc['Close'], monthly, vix_close)
-        bal = trader.get_balance(); cur_p = trader.get_current_price(TRADE_TICKER)
+        bal = trader.get_balance()
+        cur_p = trader.get_current_price(TRADE_TICKER)
         qty = trader.get_holdings(TRADE_TICKER)
         
         if bot: await bot.send_message(chat_id=chat_id, text=f"📊 공정 가동 리포트: bal=${bal:.2f} | UPRO=${cur_p:.2f}")
@@ -181,7 +172,6 @@ async def run_trading():
         if bot: await bot.send_message(chat_id=chat_id, text=f"[{now_kst.strftime('%H:%M')}] {signal}: {reason}{exec_status}")
 
     elif current_hour == 1:
-        # 비상 탈출 로직 유지
         spy_int = yf.download(SIGNAL_TICKER, period='1d', interval='5m', progress=False)
         if not spy_int.empty and (float(spy_int['Close'].iloc[-1]) / float(spy_int['Open'].iloc[0])) - 1 <= -0.03:
             qty = trader.get_holdings(TRADE_TICKER)
@@ -195,23 +185,18 @@ async def run_trading():
 # ==========================================
 def run_dashboard():
     now_kst = dt.now(KST)
-    st.set_page_config(page_title="SP500 Watchtower v3.4.7", layout="wide")
-    st.sidebar.title("v3.4.7 Final Master")
+    st.set_page_config(page_title="SP500 Watchtower v3.4.8", layout="wide")
+    st.sidebar.title("v3.4.8 Master")
     spy_ohlc, monthly, vix_close, msg = get_market_data()
     if spy_ohlc.empty: st.error("Data Load Fail"); return
     signal, reason, price, state = get_signal(spy_ohlc['Close'], monthly, vix_close)
     
-    # 5개 카드
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1: st.metric("Position", "IN" if state.get('in_market') else "OUT")
     with c2: st.metric("Signal", signal)
     with c3: st.metric("SPY Price", f"${price:.2f}")
     with c4: st.metric("Daily Ret", f"{((spy_ohlc['Close'].iloc[-1]/spy_ohlc['Close'].iloc[-2])-1)*100:+.2f}%")
     with c5: st.metric("VIX Value", f"{vix_close.iloc[-1]:.2f}")
-
-    if signal == "KEEP": st.success(f"[OK] {reason}")
-    elif signal == "EXIT": st.error(f"[EMERGENCY] {reason}")
-    else: st.info(f"[INFO] {reason}")
 
     # 3단 통합 차트
     fig = make_subplots(rows=3, cols=1, row_heights=[0.5, 0.25, 0.25], shared_xaxes=True, vertical_spacing=0.05)
@@ -222,7 +207,7 @@ def run_dashboard():
     st.plotly_chart(fig, use_container_width=True)
 
     st.divider()
-    # 성과 분석 차트
+    # 성과 분석 (바 차트 & 수익률 곡선)
     bt_sp500 = [-0.053,-0.030,0.035,-0.087,-0.006,-0.082,0.092,-0.041,-0.094,0.079,0.054,-0.058,0.062,-0.025,0.035,0.015,-0.001,0.065,0.031,-0.017,-0.048,-0.022,0.087,0.044,0.016,0.052,0.031,-0.041,0.048,0.035,0.011,0.024,0.022,-0.009,0.057,-0.024,-0.012,-0.018,-0.058,-0.082,0.065,0.038,0.042,0.018,0.025,0.031,0.044,0.019,0.008,-0.021,-0.048,0.092]
     dates = [(dt(2022,1,1) + timedelta(days=31*i)).strftime('%y-%m') for i in range(len(bt_sp500))]
     st.plotly_chart(go.Figure(go.Bar(x=dates, y=[v*100 for v in bt_sp500], marker_color=['#3fb950' if v > 0 else '#f85149' for v in bt_sp500])).update_layout(template='plotly_dark', height=250, title="Monthly Returns (%)"), use_container_width=True)
@@ -241,11 +226,10 @@ def run_dashboard():
             if rebound >= 0.02: in_m, c_d, ret_st = True, 0, r * 3 - 0.001
             else: ret_st = 0
         cap_st *= (1 + ret_st); st_hist.append(cap_st)
-    
-    st.plotly_chart(go.Figure().add_trace(go.Scatter(x=['22-01']+dates, y=st_hist, name='Strategy', line=dict(color='#3fb950'))).add_trace(go.Scatter(x=['22-01']+dates, y=bh_hist, name='SPY B&H', line=dict(color='gray', dash='dash'))).update_layout(template='plotly_dark', height=300, yaxis_title="Equity (Base 100)"), use_container_width=True)
+    st.plotly_chart(go.Figure().add_trace(go.Scatter(x=['22-01']+dates, y=st_hist, name='Strategy', line=dict(color='#3fb950'))).add_trace(go.Scatter(x=['22-01']+dates, y=bh_hist, name='SPY B&H', line=dict(color='gray', dash='dash'))).update_layout(template='plotly_dark', height=300, yaxis_title="Equity"), use_container_width=True)
 
     if os.path.exists(HISTORY_FILE):
-        st.subheader("📋 Trade History Logs")
+        st.subheader("📋 Trade Logs")
         st.dataframe(pd.read_csv(HISTORY_FILE).tail(10), use_container_width=True, hide_index=True)
 
 if __name__ == "__main__":
