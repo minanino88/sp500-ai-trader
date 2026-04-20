@@ -30,7 +30,7 @@ STATE_FILE = 'trend_state.json'
 HISTORY_FILE = 'history_trend.csv'
 
 # ==========================================
-# [체크리스트 2] KIS API 클래스 (거래소 전수 스캔 로직)
+# [체크리스트 2] KIS API 클래스 (빈 응답 방어 적용)
 # ==========================================
 class KIS_Trader:
     def __init__(self):
@@ -77,15 +77,16 @@ class KIS_Trader:
             return 0
         except: return 0
 
-    # [수정] 민환님 요청: 거래소 코드 전수 스캔 (NYS, NAS, AMS)
     def get_current_price(self, ticker=TRADE_TICKER):
         if not self.token: return 0.0
         try:
             url = f"{self.base_url}/uapi/overseas-stock/v1/quotations/price"
             headers = {"Content-Type":"application/json", "authorization":f"Bearer {self.token}", "appkey":self.app_key, "appsecret":self.app_secret, "tr_id":"HHDFS00000300"}
             for excd in ["NYS", "NAS", "AMS"]:
-                params = {"AUTH": "", "EXCD": excd, "PDNO": ticker}
-                res = requests.get(url, headers=headers, params=params).json()
+                response = requests.get(url, headers=headers, params={"AUTH": "", "EXCD": excd, "PDNO": ticker})
+                # [방어] 빈 응답 및 상태 코드 체크
+                if not response.text or response.status_code != 200: continue
+                res = response.json()
                 price = float(res.get('output', {}).get('last', 0))
                 if price > 0: return price
             return 0.0
@@ -155,7 +156,7 @@ async def run_trading():
     token = os.getenv('TELEGRAM_TOKEN'); chat_id = os.getenv('CHAT_ID')
     bot = Bot(token=token) if (Bot and token) else None
     
-    # [민환님 테스트 가이드] 현재 밤 11시이므로 23으로 임시 설정
+    # [민환님 테스트 가이드] 현재 밤 11시(23시)이므로 23으로 설정
     if current_hour == 23: 
         spy_ohlc, monthly, vix_close, msg = get_market_data()
         if spy_ohlc.empty:
@@ -164,24 +165,31 @@ async def run_trading():
         
         signal, reason, price, state = get_signal(spy_ohlc['Close'], monthly, vix_close)
         
-        # [1] 잔고 조회
+        # [1] 잔고 조회 (746달러 인식 완료)
         bal = trader.get_balance()
         if bot: await bot.send_message(chat_id=chat_id, text=f"🔍 BAL_DEBUG: {bal:.2f} USD 확인")
 
-        # [2] 민환님 요청: 가격 디버그 스캔 루프
+        # [2] 민환님 요청: 가격 디버그 스캔 루프 (방어 로직 추가)
         cur_p = 0.0
         for excd in ["NYS", "NAS", "AMS"]:
-            price_res = requests.get(
+            response = requests.get(
                 f"{trader.base_url}/uapi/overseas-stock/v1/quotations/price",
                 headers={"Content-Type":"application/json", "authorization":f"Bearer {trader.token}", "appkey":trader.app_key, "appsecret":trader.app_secret, "tr_id":"HHDFS00000300"},
                 params={"AUTH":"", "EXCD":excd, "PDNO":TRADE_TICKER}
-            ).json()
+            )
+            
+            # [방어] 민환님이 요청하신 빈 응답 및 상태 코드 검사 섹션
+            if not response.text or response.status_code != 200:
+                if bot: await bot.send_message(chat_id=chat_id, text=f"PRICE_DEBUG {excd}: 빈 응답 (status={response.status_code})")
+                continue
+            
+            price_res = response.json()
             last_p = price_res.get('output', {}).get('last', '없음')
             if bot: await bot.send_message(chat_id=chat_id, text=f"PRICE_DEBUG {excd}: rt={price_res.get('rt_cd')} last={last_p}")
             
             if last_p != '없음' and float(last_p) > 0:
                 cur_p = float(last_p)
-                break # 가격 찾으면 중단
+                break 
 
         qty = trader.get_holdings(TRADE_TICKER)
         exec_status = ""
@@ -204,13 +212,13 @@ async def run_trading():
                 with open(STATE_FILE, 'w') as f: json.dump({"in_market": False, "last_exit_price": price}, f)
             else: exec_status = f" | ❌ 매도실패: {res.get('rt_msg')}"
 
-        # [체크리스트 4] 최종 디버그 인포
+        # 최종 디버그 보고
         token_status = "OK" if trader.token else "FAIL"
         debug_info = f"\nqty={qty} | bal={bal:.1f} | price={cur_p:.2f} | token={token_status}"
         if bot: await bot.send_message(chat_id=chat_id, text=f"[20:00] {signal}: {reason}{exec_status}{debug_info}")
 
     elif current_hour == 1:
-        # [체크리스트 2] 01:00 탈출 로직 완비
+        # [체크리스트 2] 01:00 탈출 로직 유지
         spy_int = yf.download(SIGNAL_TICKER, period='1d', interval='5m', progress=False)
         if not spy_int.empty:
             spy_ret = (float(spy_int['Close'].iloc[-1]) / float(spy_int['Open'].iloc[0])) - 1
@@ -226,8 +234,8 @@ async def run_trading():
 # ==========================================
 def run_dashboard():
     now_kst = dt.now(KST)
-    st.set_page_config(page_title="SP500 Watchtower v3.2.6", layout="wide")
-    st.sidebar.title("v3.2.6 Master")
+    st.set_page_config(page_title="SP500 Watchtower v3.2.7", layout="wide")
+    st.sidebar.title("v3.2.7 Master")
     st.sidebar.caption(f"Update: {now_kst.strftime('%H:%M:%S')} KST")
     st.sidebar.divider()
     st.sidebar.write("**EXIT:** VIX+30%, SPY-3%, 3d-5%, 2m Down")
