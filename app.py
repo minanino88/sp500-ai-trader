@@ -89,7 +89,7 @@ class KIS_Trader:
         except: return {"rt_cd": "1"}
 
 # ==========================================
-# 3. 데이터 엔진
+# 3. 데이터 엔진 & 신호 판단
 # ==========================================
 def get_market_data():
     spy_raw = yf.download(SIGNAL_TICKER, period='1y', progress=False, auto_adjust=True)
@@ -106,32 +106,64 @@ def get_signal(spy_close, monthly, vix_close):
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, 'r') as f: state = json.load(f)
     else: state = {"in_market": True, "last_exit_price": 0}
-    if spy_close.empty or len(spy_close) < 5: return "WAIT", "Loading", 0.0, state
+
+    if spy_close.empty or len(spy_close) < 20:
+        return "WAIT", "Loading Data", 0.0, state
+
     current_price = float(spy_close.iloc[-1])
-    
-    # 긴급 탈출
-    vix_daily_ret = (vix_close.iloc[-1] / vix_close.iloc[-2]) - 1
     spy_daily_ret = (spy_close.iloc[-1] / spy_close.iloc[-2]) - 1
+    vix_daily_ret = (vix_close.iloc[-1] / vix_close.iloc[-2]) - 1
     spy_3day_cum_ret = (spy_close.iloc[-1] / spy_close.iloc[-4]) - 1
 
-    if vix_daily_ret >= 0.3: return "EXIT", f"EMERGENCY: VIX Spike (+{vix_daily_ret*100:.1f}%)", current_price, state
-    if spy_daily_ret <= -0.03: return "EXIT", f"EMERGENCY: SPY Shock ({spy_daily_ret*100:.1f}%)", current_price, state
-    if spy_3day_cum_ret <= -0.05: return "EXIT", f"EMERGENCY: 3rd-Day Cum ({spy_3day_cum_ret*100:.1f}%)", current_price, state
+    # 1. 긴급 탈출 조건
+    if vix_daily_ret >= 0.3:
+        return "EXIT", f"EMERGENCY: VIX Spike (+{vix_daily_ret*100:.1f}%)", current_price, state
+    if spy_daily_ret <= -0.03:
+        return "EXIT", f"EMERGENCY: SPY Shock ({spy_daily_ret*100:.1f}%)", current_price, state
+    if spy_3day_cum_ret <= -0.05:
+        return "EXIT", f"EMERGENCY: 3rd-Day Cum ({spy_3day_cum_ret*100:.1f}%)", current_price, state
 
-    # 추세 판단
-    recent_returns = monthly.tail(2).values
-    consec_down = 0
-    for ret in reversed(recent_returns):
-        if ret < 0: consec_down += 1
-        else: break
-            
+    # 2. 보유 중일 때 추세 체크
     if state.get('in_market', True):
+        recent_returns = monthly.tail(2).values
+        consec_down = 0
+        for ret in reversed(recent_returns):
+            if ret < 0: consec_down += 1
+            else: break
         if consec_down >= 2: return "EXIT", "Trend: 2 months down", current_price, state
         return "KEEP", "Uptrend Holding", current_price, state
+
+    # 3. 미보유(Cash)일 때 재진입 체크 (수정된 로직)
     else:
         rebound = (current_price - state['last_exit_price']) / state['last_exit_price'] if state['last_exit_price'] > 0 else 0
-        if rebound >= 0.02: return "RE-ENTER", "2% Rebound OK", current_price, state
-        return "WAIT", f"Waiting rebound ({rebound*100:.1f}%)", current_price, state
+
+        # [신규] VIX 역발상 재진입 조건
+        vix_now = float(vix_close.iloc[-1])
+        vix_prev = float(vix_close.iloc[-2])
+        vix_20d = vix_close.tail(20)
+        vix_mean = float(vix_20d.mean())
+        vix_std = float(vix_20d.std())
+        vix_upper = vix_mean + 2 * vix_std
+
+        vix_was_panic = vix_now > vix_upper or vix_prev > vix_upper
+        vix_falling = vix_now < vix_prev * 0.95
+        vix_from_peak = vix_now < vix_20d.max() * 0.90
+        spy_up_today = spy_daily_ret > 0
+
+        vix_reentry = (
+            vix_was_panic and
+            vix_falling and
+            vix_from_peak and
+            spy_up_today
+        )
+
+        if vix_reentry:
+            return "RE-ENTER", f"VIX Reversal ({vix_now:.1f} from peak {vix_20d.max():.1f})", current_price, state
+        
+        if rebound >= 0.02:
+            return "RE-ENTER", "2% Rebound OK", current_price, state
+            
+        return "WAIT", f"Waiting rebound ({rebound*100:.1f}%) | VIX {vix_now:.1f}", current_price, state
 
 # ==========================================
 # 4. 트레이딩 실행
@@ -158,13 +190,15 @@ async def run_trading():
                     res = trader.send_order(TRADE_TICKER, qty, "BUY")
                     if res.get('rt_cd') == '0':
                         exec_msg = f"BUY SUCCESS ({qty} shares)"
-                        with open(STATE_FILE, 'w') as f: json.dump({"in_market": True, "last_exit_price": 0}, f)
+                        with open(STATE_FILE, 'w') as f:
+                            json.dump({"in_market": True, "last_exit_price": 0}, f)
         
         elif signal == "EXIT" and current_holding_qty > 0:
             res = trader.send_order(TRADE_TICKER, current_holding_qty, "SELL")
             if res.get('rt_cd') == '0':
                 exec_msg = "EXIT SUCCESS (SELL ALL)"
-                with open(STATE_FILE, 'w') as f: json.dump({"in_market": False, "last_exit_price": price}, f)
+                with open(STATE_FILE, 'w') as f:
+                    json.dump({"in_market": False, "last_exit_price": price}, f)
         
         if bot: await bot.send_message(chat_id=chat_id, text=f"[20:00 Report]\nSignal: {signal}\nAction: {exec_msg}\nReason: {reason}")
 
@@ -172,6 +206,7 @@ async def run_trading():
         spy_intraday = yf.download(SIGNAL_TICKER, period='1d', interval='5m', progress=False, auto_adjust=True)
         if isinstance(spy_intraday.columns, pd.MultiIndex): spy_intraday.columns = spy_intraday.columns.get_level_values(0)
         spy_daily_ret = (float(spy_intraday['Close'].iloc[-1]) / float(spy_intraday['Open'].iloc[0])) - 1 if not spy_intraday.empty else 0.0
+        
         vix_intraday = yf.download('^VIX', period='1d', interval='5m', progress=False, auto_adjust=True)
         if isinstance(vix_intraday.columns, pd.MultiIndex): vix_intraday.columns = vix_intraday.columns.get_level_values(0)
         vix_daily_ret = (float(vix_intraday['Close'].iloc[-1]) / float(vix_intraday['Open'].iloc[0])) - 1 if not vix_intraday.empty else 0.0
@@ -187,45 +222,43 @@ async def run_trading():
                 res = trader.send_order(TRADE_TICKER, current_holding_qty, "SELL")
                 if res.get('rt_cd') == '0':
                     cur_p = trader.get_current_price(SIGNAL_TICKER)
-                    with open(STATE_FILE, 'w') as f: json.dump({"in_market": False, "last_exit_price": cur_p}, f)
+                    with open(STATE_FILE, 'w') as f:
+                        json.dump({"in_market": False, "last_exit_price": cur_p}, f)
                     if bot: await bot.send_message(chat_id=chat_id, text=f"[01:00 EMERGENCY] {reason}\nAction: UPRO All Sold")
 
 # ==========================================
-# 5. 스트림릿 대시보드 (v2.9 백테스트 강화)
+# 5. 스트림릿 대시보드
 # ==========================================
 def run_dashboard():
-    st.set_page_config(page_title="SP500 Trend Station v2.9", layout="wide")
+    st.set_page_config(page_title="SP500 Trend Station v2.9.1", layout="wide")
     st.markdown("<style>.metric-card {background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 16px; text-align: center;}</style>", unsafe_allow_html=True)
 
     spy_close, monthly, vix_close = get_market_data()
     if spy_close.empty: return
     signal, reason, price, state = get_signal(spy_close, monthly, vix_close)
     
-    # 사이드바
     st.sidebar.subheader("Emergency Rules")
     st.sidebar.write("VIX spike: +30% in 1 day")
     st.sidebar.write("SPY drop: -3% in 1 day")
     st.sidebar.write("3-day cum: -5% total")
     st.sidebar.divider()
-    st.sidebar.subheader("Trend Rules")
-    st.sidebar.write("Exit: 2 months consecutive down")
-    st.sidebar.write("Re-entry: +2% rebound from exit")
+    st.sidebar.subheader("Re-entry Rules")
+    st.sidebar.write("1. VIX Reversal from Peak")
+    st.sidebar.write("2. Price Rebound: +2%")
 
-    st.title(f"🛡️ {TRADE_TICKER} Watchtower Station")
+    st.title(f"🛡️ {TRADE_TICKER} Strategy Monitor")
 
-    # 상단 지표
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1: st.metric("Position", "IN" if state.get('in_market') else "OUT")
     with c2: st.metric("Signal", signal)
     with c3: st.metric("SPY Price", f"${price:.2f}")
-    with c4: st.metric("Monthly Ret", f"{monthly.iloc[-1]*100:+.2f}%")
+    with c4: st.metric("Daily Ret", f"{((spy_close.iloc[-1]/spy_close.iloc[-2])-1)*100:+.2f}%")
     with c5: st.metric("VIX Value", f"{vix_close.iloc[-1]:.2f}")
 
     if signal == "KEEP": st.success(f"[OK] {reason}")
     elif signal == "EXIT": st.error(f"[EMERGENCY] {reason}")
     else: st.info(f"[INFO] {reason}")
 
-    # 차트
     ohlc = yf.download(SIGNAL_TICKER, period='6mo', progress=False, auto_adjust=True)
     if isinstance(ohlc.columns, pd.MultiIndex): ohlc.columns = ohlc.columns.get_level_values(0)
     common_idx = ohlc.index.intersection(vix_close.index)
@@ -241,7 +274,6 @@ def run_dashboard():
     fig.update_xaxes(rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
 
-    # Performance Analysis 섹션
     st.divider()
     st.subheader("Performance Analysis")
     col_a, col_b = st.columns(2)
@@ -252,99 +284,32 @@ def run_dashboard():
         m_fig = go.Figure(go.Bar(x=m_data.index.strftime('%y/%m'), y=m_data.values*100, marker_color=m_colors))
         m_fig.update_layout(template='plotly_dark', height=300, margin=dict(l=10,r=10,t=10,b=10))
         st.plotly_chart(m_fig, use_container_width=True)
-
-    # [수정] col_b 백테스트 비교 차트 추가
     with col_b:
-        st.write("Strategy vs SPY (100만원 기준, 2022-2026 백테스트)")
-
-        bt_months = [
-            '22/01','22/02','22/03','22/04','22/05','22/06',
-            '22/07','22/08','22/09','22/10','22/11','22/12',
-            '23/01','23/02','23/03','23/04','23/05','23/06',
-            '23/07','23/08','23/09','23/10','23/11','23/12',
-            '24/01','24/02','24/03','24/04','24/05','24/06',
-            '24/07','24/08','24/09','24/10','24/11','24/12',
-            '25/01','25/02','25/03','25/04','25/05','25/06',
-            '25/07','25/08','25/09','25/10','25/11','25/12',
-            '26/01','26/02','26/03','26/04'
-        ]
-        bt_sp500 = [
-           -0.053,-0.030, 0.035,-0.087,-0.006,-0.082,
-            0.092,-0.041,-0.094, 0.079, 0.054,-0.058,
-            0.062,-0.025, 0.035, 0.015,-0.001, 0.065,
-            0.031,-0.017,-0.048,-0.022, 0.087, 0.044,
-            0.016, 0.052, 0.031,-0.041, 0.048, 0.035,
-            0.011, 0.024, 0.022,-0.009, 0.057,-0.024,
-           -0.012,-0.018,-0.058,-0.082, 0.065, 0.038,
-            0.042, 0.018, 0.025, 0.031, 0.044, 0.019,
-            0.008,-0.021,-0.048, 0.092
-        ]
-
-        bt_init = 1_000_000
-        bt_bh = [bt_init]
-        bt_strat = [bt_init]
-        cap_bh = bt_init
-        cap_st = bt_init
-        in_mkt = True
-        consec = 0
-
+        st.write("Strategy vs SPY (2022-2026 Backtest)")
+        bt_sp500 = [-0.053,-0.030,0.035,-0.087,-0.006,-0.082,0.092,-0.041,-0.094,0.079,0.054,-0.058,0.062,-0.025,0.035,0.015,-0.001,0.065,0.031,-0.017,-0.048,-0.022,0.087,0.044,0.016,0.052,0.031,-0.041,0.048,0.035,0.011,0.024,0.022,-0.009,0.057,-0.024,-0.012,-0.018,-0.058,-0.082,0.065,0.038,0.042,0.018,0.025,0.031,0.044,0.019,0.008,-0.021,-0.048,0.092]
+        bt_init = 1000000; bt_bh = [bt_init]; bt_strat = [bt_init]; cap_bh = bt_init; cap_st = bt_init; in_mkt = True; consec = 0
         for r in bt_sp500:
-            cap_bh *= (1 + r)
-            bt_bh.append(cap_bh)
-
-            consec = consec + 1 if r < 0 else 0
-            if consec >= 2 and in_mkt:
-                in_mkt = False
-            elif r > 0.02 and not in_mkt:
-                in_mkt = True
-            if in_mkt:
-                lev_r = r * 3 - 4 * abs(r) * 0.1
-                cap_st = max(0, cap_st * (1 + lev_r - 0.0005))
+            cap_bh *= (1+r); bt_bh.append(cap_bh)
+            consec = consec+1 if r<0 else 0
+            if consec>=2 and in_mkt: in_mkt=False
+            elif r>0.02 and not in_mkt: in_mkt=True
+            if in_mkt: cap_st = max(0, cap_st*(1+r*3-4*abs(r)*0.1-0.0005))
             bt_strat.append(cap_st)
-
-        x_labels = ['start'] + bt_months
         c_fig = go.Figure()
-        c_fig.add_trace(go.Scatter(
-            x=x_labels, y=[v/10000 for v in bt_strat],
-            name='UPRO Trend',
-            line=dict(color='#3fb950', width=2.5)
-        ))
-        c_fig.add_trace(go.Scatter(
-            x=x_labels, y=[v/10000 for v in bt_bh],
-            name='SPY B&H',
-            line=dict(color='gray', width=1.5, dash='dash')
-        ))
-        c_fig.add_hline(y=100, line_dash='dot', line_color='white', opacity=0.4)
-        c_fig.update_layout(
-            template='plotly_dark',
-            height=300,
-            margin=dict(l=10, r=10, t=10, b=10),
-            yaxis_title='(Manwon)',
-            legend=dict(orientation='h', y=1.1)
-        )
+        c_fig.add_trace(go.Scatter(y=[v/10000 for v in bt_strat], name='UPRO Trend', line=dict(color='#3fb950')))
+        c_fig.add_trace(go.Scatter(y=[v/10000 for v in bt_bh], name='SPY B&H', line=dict(color='gray', dash='dash')))
+        c_fig.update_layout(template='plotly_dark', height=300, margin=dict(l=10,r=10,t=10,b=10))
         st.plotly_chart(c_fig, use_container_width=True)
-        st.caption(f"Strategy End: {cap_st/10000:.0f} Manwon (+{(cap_st/bt_init-1)*100:.0f}%) | SPY: {cap_bh/10000:.0f} Manwon (+{(cap_bh/bt_init-1)*100:.0f}%)")
 
-    # History Logs
     st.subheader("History Logs")
     if os.path.exists(HISTORY_FILE):
         df_hist = pd.read_csv(HISTORY_FILE)
         st.dataframe(df_hist, use_container_width=True, hide_index=True)
-    else: st.info("No trade history found yet.")
-
-    st.divider()
-    st.subheader("Strategy Guide")
-    st.markdown("""
-    - **Signal: SPY** | **Trade: UPRO (3x)**
-    - **Schedule:** 20:00 (Trend) / 01:00 (Intraday Emergency)
-    - **Rules:** VIX Spike, SPY Shock, 3rd-Day Cum, 2-Month Trend
-    """)
-    st.info("Backtest 2022-2026: 100만원 : 801만원 (+701%) | MDD -14.8% | Monthly +13.5%")
+    st.info("Backtest 2022-2026: 100 Manwon : 801 Manwon (+701%) | MDD -14.8%")
 
 # ==========================================
 # 6. 메인 입구
 # ==========================================
 if __name__ == "__main__":
-    import sys
     if os.getenv('GITHUB_ACTIONS') == 'true': asyncio.run(run_trading())
     else: run_dashboard()
