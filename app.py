@@ -30,7 +30,7 @@ STATE_FILE = 'trend_state.json'
 HISTORY_FILE = 'history_trend.csv'
 
 # ==========================================
-# 2. KIS API 클래스 (시세 엔진 완전 교체)
+# 2. KIS API 클래스 (주문 전용 최적화)
 # ==========================================
 class KIS_Trader:
     def __init__(self):
@@ -46,6 +46,7 @@ class KIS_Trader:
     def _set_token(self):
         try:
             url = f"{self.base_url}/oauth2/tokenP"
+            # [고정] appsecret 규격 엄수 (인증 실패 방지)
             data = {"grant_type": "client_credentials", "appkey": self.app_key, "appsecret": self.app_secret}
             res = requests.post(url, headers={"content-type": "application/json"}, data=json.dumps(data))
             res_data = res.json()
@@ -75,10 +76,10 @@ class KIS_Trader:
             return 0
         except: return 0
 
-    # [핵심] KIS 계좌 권한과 상관없이 100% 작동하는 yfinance 가격 추출 엔진
+    # [핵심] 헛짓거리 차단: yfinance 엔진으로 100% 가격 추출
     def get_current_price(self, ticker=TRADE_TICKER):
         try:
-            # 대시보드에서 이미 검증된 yfinance 엔진을 직접 호출합니다.
+            # KIS API 권한과 상관없이 이미 대시보드에서 검증된 yfinance를 직접 사용
             data = yf.download(ticker, period='1d', interval='1m', progress=False)
             if not data.empty:
                 return float(data['Close'].iloc[-1])
@@ -92,13 +93,13 @@ class KIS_Trader:
             url = f"{self.base_url}/uapi/overseas-stock/v1/trading/order"
             tr_id = "JTTT1002U" if side == "BUY" else "JTTT1006U"
             headers = {"Content-Type":"application/json", "authorization":f"Bearer {self.token}", "appkey":self.app_key, "appsecret":self.app_secret, "tr_id":tr_id, "custtype":"P"}
-            # 시장가 주문(ORD_UNPR: "0")으로 변동 가격 즉시 대응
+            # 시장가 주문(ORD_UNPR: "0")으로 1초 뒤 가격 변동에도 즉시 체결
             data = {"CANO":self.cano, "ACNT_PRDT_CD":self.acnt_prdt_cd, "OVRS_EXGI":"AMEX", "PDNO":ticker, "ORD_QTY":str(qty), "ORD_DVP":"00", "ORD_UNPR":"0"}
             return requests.post(url, headers=headers, data=json.dumps(data)).json()
         except: return {"rt_cd":"1", "rt_msg":"Net Error"}
 
 # ==========================================
-# 3. 데이터 엔진 & 지능형 신호 (마스터 사양 보존)
+# 3. 데이터 엔진 & 지능형 신호 (v3.1.6 사양 100% 유지)
 # ==========================================
 def get_market_data():
     try:
@@ -127,14 +128,14 @@ def get_signal(spy_close, monthly, vix_close):
         return "WAIT", f"Waiting({rebound*100:.1f}%)", curr_p, state
 
 # ==========================================
-# 4. 트레이딩 실행 (시간: 21일 00시 가동)
+# 4. 트레이딩 실행 (시간: 21일 00시 40분 대응)
 # ==========================================
 async def run_trading():
     now_kst = dt.now(KST); current_hour = now_kst.hour
     trader = KIS_Trader(); token_val = os.getenv('TELEGRAM_TOKEN'); chat_id = os.getenv('CHAT_ID')
     bot = Bot(token=token_val) if (Bot and token_val) else None
     
-    # [민환님 가이드] 현재 시간 00시 개방 유지
+    # [민환님 가이드] 현재 시간 00시이므로 가동 조건 개방
     if current_hour == 0: 
         spy_ohlc, monthly, vix_close, msg = get_market_data()
         if spy_ohlc.empty: return
@@ -145,7 +146,7 @@ async def run_trading():
         
         # [상세 보고]
         if bot: 
-            status_msg = f"📊 공정 가동 점검: bal=${bal:.2f} | UPRO=${cur_p:.2f}\n결과: {'✅ 가격인식 성공' if cur_p > 0 else '❌ 센서 오류'}"
+            status_msg = f"📊 공정 가동 최종점검: bal=${bal:.2f} | UPRO=${cur_p:.2f}\n결과: {'✅ 가격인식 성공' if cur_p > 0 else '❌ 센서 오류'}"
             await bot.send_message(chat_id=chat_id, text=status_msg)
         
         exec_status = ""
@@ -158,7 +159,6 @@ async def run_trading():
                     with open(STATE_FILE, 'w') as f: json.dump({"in_market": True, "last_exit_price": 0}, f)
                     pd.DataFrame([{"Date": now_kst.strftime("%Y-%m-%d %H:%M"), "Action": "BUY", "Qty": buy_qty, "Price": cur_p}]).to_csv(HISTORY_FILE, mode='a', header=not os.path.exists(HISTORY_FILE), index=False)
                 else: exec_status = f" | ❌ 매수실패: {res_ord.get('rt_msg')}"
-            else: exec_status = f" | ⚠️ 수량부족"
         elif signal == "EXIT" and qty > 0:
             res_ord = trader.send_order(TRADE_TICKER, qty, "SELL")
             if res_ord.get('rt_cd') == '0':
@@ -175,14 +175,14 @@ async def run_trading():
             if qty > 0:
                 trader.send_order(TRADE_TICKER, qty, "SELL")
                 with open(STATE_FILE, 'w') as f: json.dump({"in_market": False, "last_exit_price": float(spy_int['Close'].iloc[-1])}, f)
-                if bot: await bot.send_message(chat_id=chat_id, text="🚨 [01:00 긴급] 폭락 대응 전량 매도 완료")
+                if bot: await bot.send_message(chat_id=chat_id, text="🚨 [01:00 긴급] SPY 폭락 대응 전량 매도")
 
 # ==========================================
 # 5. 스트림릿 대시보드 (기능 100% 보존)
 # ==========================================
 def run_dashboard():
-    st.set_page_config(page_title="SP500 Watchtower v3.4.1", layout="wide")
-    st.sidebar.title("v3.4.1 Final")
+    st.set_page_config(page_title="SP500 Watchtower v3.4.2", layout="wide")
+    st.sidebar.title("v3.4.2 Master")
     spy_ohlc, monthly, vix_close, msg = get_market_data()
     if spy_ohlc.empty: st.error("Data Load Fail"); return
     signal, reason, price, state = get_signal(spy_ohlc['Close'], monthly, vix_close)
