@@ -134,7 +134,6 @@ def get_signal(spy_close, monthly, vix_close):
 # 4. 트레이딩 실행 (시간 오차 해결 버전)
 # ==========================================
 async def run_trading():
-    # [중요] 시간 체크를 함수 시작 직후에 수행하여 지연 시간 상쇄
     now_kst = datetime.now(KST)
     current_hour = now_kst.hour
     
@@ -168,7 +167,6 @@ async def run_trading():
                 with open(STATE_FILE, 'w') as f: json.dump({"in_market": False, "last_exit_price": price}, f)
             else: exec_status = f" | ❌ 매도실패: {res.get('rt_msg')}"
 
-        # 디버그 보고 강화
         debug_info = f"\nqty={qty} | bal={trader.get_balance():.1f} | price={trader.get_current_price(TRADE_TICKER):.2f} | token={'OK' if trader.token else 'FAIL'}"
         if bot: await bot.send_message(chat_id=chat_id, text=f"[20:00] {signal}: {reason}{exec_status}{debug_info}")
 
@@ -188,8 +186,8 @@ async def run_trading():
 # ==========================================
 def run_dashboard():
     now_kst = datetime.now(KST)
-    st.set_page_config(page_title="SP500 Watchtower v3.0.9", layout="wide")
-    st.sidebar.title("v3.0.9 Master")
+    st.set_page_config(page_title="SP500 Watchtower v3.1.0", layout="wide")
+    st.sidebar.title("v3.1.0 Master")
     st.sidebar.caption(f"Update: {now_kst.strftime('%H:%M:%S')} KST")
     st.sidebar.divider()
     st.sidebar.write("**EXIT:** VIX+30%, SPY-3%, 3d-5%, 2m Down")
@@ -200,6 +198,7 @@ def run_dashboard():
     if spy_ohlc.empty: st.error(f"❌ 데이터 로드 실패: {msg}"); return
     signal, reason, price, state = get_signal(spy_ohlc['Close'], monthly, vix_close)
     
+    # 지표 카드
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1: st.metric("Position", "IN" if state.get('in_market') else "OUT")
     with c2: st.metric("Signal", signal)
@@ -211,7 +210,7 @@ def run_dashboard():
     elif signal == "EXIT": st.error(f"[EMERGENCY] {reason}")
     else: st.info(f"[INFO] {reason}")
 
-    # 시장 차트
+    # 시장 차트 (3단)
     common_idx = spy_ohlc.index.intersection(vix_close.index)
     ohlc_p, vix_p = spy_ohlc.loc[common_idx].tail(126), vix_close.loc[common_idx].tail(126)
     fig = make_subplots(rows=3, cols=1, row_heights=[0.5, 0.25, 0.25], shared_xaxes=True, vertical_spacing=0.05)
@@ -227,6 +226,13 @@ def run_dashboard():
     bt_sp500 = [-0.053,-0.030,0.035,-0.087,-0.006,-0.082,0.092,-0.041,-0.094,0.079,0.054,-0.058,0.062,-0.025,0.035,0.015,-0.001,0.065,0.031,-0.017,-0.048,-0.022,0.087,0.044,0.016,0.052,0.031,-0.041,0.048,0.035,0.011,0.024,0.022,-0.009,0.057,-0.024,-0.012,-0.018,-0.058,-0.082,0.065,0.038,0.042,0.018,0.025,0.031,0.044,0.019,0.008,-0.021,-0.048,0.092]
     dates = [(datetime(2022,1,1) + timedelta(days=31*i)).strftime('%y-%m') for i in range(len(bt_sp500))]
     
+    # [복구] 월별 수익률 바 차트
+    m_colors = ['#3fb950' if v > 0 else '#f85149' for v in bt_sp500]
+    m_fig = go.Figure(go.Bar(x=dates, y=[v*100 for v in bt_sp500], marker_color=m_colors))
+    m_fig.update_layout(template='plotly_dark', height=250, margin=dict(l=10,r=10,t=10,b=10), title="Historical Monthly Returns (%)", yaxis_title="%")
+    st.plotly_chart(m_fig, use_container_width=True)
+
+    # 백테스트 엔진 (버그 수정 반영)
     st_hist, bh_hist = [100.0], [100.0]
     in_m, c_d, cap_st, cap_bh, spy_p, last_ex_p = True, 0, 100.0, 100.0, 100.0, 100.0
     for r in bt_sp500:
@@ -235,21 +241,21 @@ def run_dashboard():
             if r < 0: c_d += 1
             else: c_d = 0
             if c_d >= 2: in_m, last_ex_p, ret_st = False, spy_p, 0
-            else: ret_st = r * 3 - 0.001 # 3x leverage with 0.1% monthly cost
+            else: ret_st = r * 3 - 0.001
         else:
             rebound = (spy_p - last_ex_p) / last_ex_p
             if rebound >= 0.02: in_m, c_d, ret_st = True, 0, r * 3 - 0.001
             else: ret_st = 0
         cap_st *= (1 + ret_st); st_hist.append(cap_st)
 
+    # 전략 비교 차트
     c_fig = go.Figure()
     c_fig.add_trace(go.Scatter(x=['22-01']+dates, y=st_hist, name='Strategy', line=dict(color='#3fb950', width=2)))
     c_fig.add_trace(go.Scatter(x=['22-01']+dates, y=bh_hist, name='SPY B&H', line=dict(color='gray', dash='dash')))
-    c_fig.update_layout(template='plotly_dark', height=300, margin=dict(l=10,r=10,t=10,b=10))
+    c_fig.update_layout(template='plotly_dark', height=300, margin=dict(l=10,r=10,t=10,b=10), yaxis_title="Manwon (Start: 100)")
     st.plotly_chart(c_fig, use_container_width=True)
 
     with st.expander("Strategy Guide & Performance Details"):
-        # [수정] 하드코딩 제거: 실제 st_hist 기반 동적 계산
         final = st_hist[-1]
         st.write(f"### 📈 Dynamic Total Return: {(final-100):.1f}%")
         st.write(f"Initial: 100 Manwon -> **Final: {final:.0f} Manwon**")
