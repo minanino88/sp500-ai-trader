@@ -29,7 +29,7 @@ STATE_FILE = 'trend_state.json'
 HISTORY_FILE = 'history_trend.csv'
 
 # ==========================================
-# [체크리스트 2] KIS API 클래스 (OVRS_EXCG_CD 규격 수정)
+# [체크리스트 2] KIS API 클래스 (통화 규격 수정)
 # ==========================================
 class KIS_Trader:
     def __init__(self):
@@ -59,8 +59,8 @@ class KIS_Trader:
         try:
             url = f"{self.base_url}/uapi/overseas-stock/v1/trading/inquire-balance"
             headers = {"Content-Type":"application/json", "authorization":f"Bearer {self.token}", "appkey":self.app_key, "appsecret":self.app_secret, "tr_id":"JTTT3012R"}
-            # [수정] OVRS_EXGI -> OVRS_EXCG_CD (전체 조회용)
-            params = {"CANO":self.cano, "ACNT_PRDT_CD":self.acnt_prdt_cd, "OVRS_EXCG_CD":"", "TR_CRC_CYCD":"USD", "CTX_AREA_FK200":"", "CTX_AREA_NK200":""}
+            # [수정] TR_CRC_CYCD -> TR_CRCY_CD
+            params = {"CANO":self.cano, "ACNT_PRDT_CD":self.acnt_prdt_cd, "OVRS_EXCG_CD":"", "TR_CRCY_CD":"USD", "CTX_AREA_FK200":"", "CTX_AREA_NK200":""}
             res = requests.get(url, headers=headers, params=params)
             for item in res.json().get('output1', []):
                 if item.get('pdno') == ticker: return int(item.get('ccld_qty_smtl', 0))
@@ -150,15 +150,16 @@ async def run_trading():
         
         signal, reason, price, state = get_signal(spy_ohlc['Close'], monthly, vix_close)
         
-        # [수정] OVRS_EXCG_CD 규격 반영 정밀 진단
+        # [수정] TR_CRCY_CD 규격 반영 정밀 진단
         url = f"{trader.base_url}/uapi/overseas-stock/v1/trading/inquire-balance"
         headers = {"Content-Type":"application/json", "authorization":f"Bearer {trader.token}", "appkey":trader.app_key, "appsecret":trader.app_secret, "tr_id":"JTTT3012R"}
-        params = {"CANO":trader.cano, "ACNT_PRDT_CD":trader.acnt_prdt_cd, "OVRS_EXCG_CD":"", "TR_CRC_CYCD":"USD", "CTX_AREA_FK200":"", "CTX_AREA_NK200":""}
+        # [수정] TR_CRCY_CD 적용
+        params = {"CANO":trader.cano, "ACNT_PRDT_CD":trader.acnt_prdt_cd, "OVRS_EXCG_CD":"", "TR_CRCY_CD":"USD", "CTX_AREA_FK200":"", "CTX_AREA_NK200":""}
         
         bal_res = requests.get(url, headers=headers, params=params).json()
         out2_data = bal_res.get('output2', {})
         
-        # [마스터 체크리스트 4] 전체 응답 송신
+        # [체크리스트 4] 전체 응답 송신
         if bot: 
             debug_msg = (
                 f"🔍 BAL_DEBUG (Full):\n"
@@ -168,7 +169,7 @@ async def run_trading():
             )
             await bot.send_message(chat_id=chat_id, text=debug_msg)
         
-        # 잔고 파싱 (여러 필드 검사)
+        # 잔고 파싱
         bal = float(out2_data.get('frcr_dncl_amt_2', 0))
         if bal == 0: bal = float(out2_data.get('ovrs_stck_drct_buy_psbl_amt', 0))
         
@@ -215,8 +216,8 @@ async def run_trading():
 # ==========================================
 def run_dashboard():
     now_kst = datetime.now(KST)
-    st.set_page_config(page_title="SP500 Watchtower v3.1.9", layout="wide")
-    st.sidebar.title("v3.1.9 Master")
+    st.set_page_config(page_title="SP500 Watchtower v3.2.0", layout="wide")
+    st.sidebar.title("v3.2.0 Master")
     st.sidebar.caption(f"Update: {now_kst.strftime('%H:%M:%S')} KST")
     st.sidebar.divider()
     st.sidebar.write("**EXIT:** VIX+30%, SPY-3%, 3d-5%, 2m Down")
