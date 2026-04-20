@@ -30,7 +30,7 @@ STATE_FILE = 'trend_state.json'
 HISTORY_FILE = 'history_trend.csv'
 
 # ==========================================
-# [체크리스트 2] KIS API 클래스 (AMEX 규격 완결)
+# [체크리스트 2] KIS API 클래스 (시세 규격 교정)
 # ==========================================
 class KIS_Trader:
     def __init__(self):
@@ -77,33 +77,27 @@ class KIS_Trader:
             return 0
         except: return 0
 
-    # [수정] EXCD: "AMS" -> "AMEX" (가격표 인식 성공 시나리오)
+    # [수정] EXCD: "AMEX" -> "NYS" (민환님 분석 반영)
     def get_current_price(self, ticker=TRADE_TICKER):
         if not self.token: return 0.0
         try:
             url = f"{self.base_url}/uapi/overseas-stock/v1/quotations/price"
             headers = {"Content-Type":"application/json", "authorization":f"Bearer {self.token}", "appkey":self.app_key, "appsecret":self.app_secret, "tr_id":"HHDFS00000300"}
-            params = {"AUTH": "", "EXCD": "AMEX", "PDNO": ticker}
+            params = {"AUTH": "", "EXCD": "NYS", "PDNO": ticker}
             res = requests.get(url, headers=headers, params=params).json()
+            print(f"PRICE_DEBUG: {res}") # Actions 로그 출력
             return float(res.get('output', {}).get('last', 0))
-        except: return 0.0
+        except Exception as e:
+            print(f"PRICE_ERROR: {str(e)}")
+            return 0.0
 
-    # [수정] OVRS_EXGI: "AMEX" 및 tr_id 재확인
     def send_order(self, ticker, qty, side="BUY"):
         if not self.token: return {"rt_cd": "1", "rt_msg": "No Token"}
         try:
             url = f"{self.base_url}/uapi/overseas-stock/v1/trading/order"
             tr_id = "JTTT1002U" if side == "BUY" else "JTTT1006U"
             headers = {"Content-Type":"application/json", "authorization":f"Bearer {self.token}", "appkey":self.app_key, "appsecret":self.app_secret, "tr_id":tr_id}
-            data = {
-                "CANO": self.cano, 
-                "ACNT_PRDT_CD": self.acnt_prdt_cd, 
-                "OVRS_EXGI": "AMEX", 
-                "PDNO": ticker, 
-                "ORD_QTY": str(qty), 
-                "ORD_DVP": "00", 
-                "ORD_UNPR": "0"
-            }
+            data = {"CANO":self.cano, "ACNT_PRDT_CD":self.acnt_prdt_cd, "OVRS_EXGI":"AMEX", "PDNO":ticker, "ORD_QTY":str(qty), "ORD_DVP":"00", "ORD_UNPR":"0"}
             return requests.post(url, headers=headers, data=json.dumps(data)).json()
         except: return {"rt_cd": "1", "rt_msg": "Network Error"}
 
@@ -161,7 +155,7 @@ async def run_trading():
     token = os.getenv('TELEGRAM_TOKEN'); chat_id = os.getenv('CHAT_ID')
     bot = Bot(token=token) if (Bot and token) else None
     
-    # [민환님 테스트 가이드] 현재 밤 11시이므로 23으로 임시 설정
+    # [임시 테스트용] 현재 밤 11시이므로 23으로 설정
     if current_hour == 23: 
         spy_ohlc, monthly, vix_close, msg = get_market_data()
         if spy_ohlc.empty:
@@ -170,12 +164,26 @@ async def run_trading():
         
         signal, reason, price, state = get_signal(spy_ohlc['Close'], monthly, vix_close)
         
-        # [1] 가용 잔고 조회 (확정된 센서)
+        # [1] 잔고 조회 (검증 완료)
         bal = trader.get_balance()
         
-        # [2] UPRO 현재가 조회 (AMEX 규격 적용)
-        cur_p = trader.get_current_price(TRADE_TICKER)
+        # [2] 현재가 정밀 디버깅 (민환님 요청 반영)
+        price_res = requests.get(
+            f"{trader.base_url}/uapi/overseas-stock/v1/quotations/price",
+            headers={"Content-Type":"application/json", "authorization":f"Bearer {trader.token}", "appkey":trader.app_key, "appsecret":trader.app_secret, "tr_id":"HHDFS00000300"},
+            params={"AUTH":"", "EXCD":"NYS", "PDNO":TRADE_TICKER}
+        ).json()
         
+        if bot: 
+            debug_price_msg = (
+                f"🔍 PRICE_DEBUG:\n"
+                f"rt_cd={price_res.get('rt_cd')}\n"
+                f"msg1={price_res.get('msg1')}\n"
+                f"output={str(price_res.get('output',{}))[:300]}"
+            )
+            await bot.send_message(chat_id=chat_id, text=debug_price_msg)
+            
+        cur_p = float(price_res.get('output', {}).get('last', 0))
         qty = trader.get_holdings(TRADE_TICKER)
         exec_status = ""
         
@@ -197,13 +205,13 @@ async def run_trading():
                 with open(STATE_FILE, 'w') as f: json.dump({"in_market": False, "last_exit_price": price}, f)
             else: exec_status = f" | ❌ 매도실패: {res.get('rt_msg')}"
 
-        # [체크리스트 4] 최종 디버그 인포
+        # 최종 디버그 보고
         token_status = "OK" if trader.token else "FAIL"
         debug_info = f"\nqty={qty} | bal={bal:.1f} | price={cur_p:.2f} | token={token_status}"
         if bot: await bot.send_message(chat_id=chat_id, text=f"[20:00] {signal}: {reason}{exec_status}{debug_info}")
 
     elif current_hour == 1:
-        # [체크리스트 2] 01:00 탈출 로직 완비
+        # [체크리스트 2] 01:00 탈출 보존
         spy_int = yf.download(SIGNAL_TICKER, period='1d', interval='5m', progress=False)
         if not spy_int.empty:
             spy_ret = (float(spy_int['Close'].iloc[-1]) / float(spy_int['Open'].iloc[0])) - 1
@@ -219,8 +227,8 @@ async def run_trading():
 # ==========================================
 def run_dashboard():
     now_kst = dt.now(KST)
-    st.set_page_config(page_title="SP500 Watchtower v3.2.4", layout="wide")
-    st.sidebar.title("v3.2.4 Master")
+    st.set_page_config(page_title="SP500 Watchtower v3.2.5", layout="wide")
+    st.sidebar.title("v3.2.5 Master")
     st.sidebar.caption(f"Update: {now_kst.strftime('%H:%M:%S')} KST")
     st.sidebar.divider()
     st.sidebar.write("**EXIT:** VIX+30%, SPY-3%, 3d-5%, 2m Down")
