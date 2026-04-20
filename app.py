@@ -29,32 +29,35 @@ STATE_FILE = 'trend_state.json'
 HISTORY_FILE = 'history_trend.csv'
 
 # ==========================================
-# [마스터 체크리스트 2] KIS API 클래스 (심층 진단 보강)
+# [마스터 체크리스트 2] KIS API 클래스 (인증 규격 수정)
 # ==========================================
 class KIS_Trader:
     def __init__(self):
-        # [체크] 실전매매용 URL입니다. 모의투자라면 openapivts로 변경 필요
         self.base_url = "https://openapi.koreainvestment.com:9443"
         self.app_key = os.getenv('KIS_APPKEY')
         self.app_secret = os.getenv('KIS_SECRET')
         self.cano = os.getenv('KIS_CANO')
         self.acnt_prdt_cd = os.getenv('KIS_ACNT_PRDT_CD', '01')
         self.token = None
-        self.error_detail = "Initial State"
+        self.error_detail = "Initial"
         self._set_token()
 
     def _set_token(self):
         try:
             url = f"{self.base_url}/oauth2/tokenP"
-            data = {"grant_type": "client_credentials", "appkey": self.app_key, "secretkey": self.app_secret}
+            # [수정] secretkey -> appsecret 으로 필드명 변경 (범인 검거)
+            data = {
+                "grant_type": "client_credentials", 
+                "appkey": self.app_key, 
+                "appsecret": self.app_secret 
+            }
             res = requests.post(url, headers={"content-type": "application/json"}, data=json.dumps(data))
             res_data = res.json()
             self.token = res_data.get('access_token')
             if not self.token:
-                # 증권사에서 보내온 실제 에러 사유를 저장
-                self.error_detail = res_data.get('error_description', res_data.get('msg1', 'Unknown Auth Error'))
+                self.error_detail = res_data.get('error_description', res_data.get('msg1', 'Auth Error'))
         except Exception as e:
-            self.error_detail = f"Conn Error: {str(e)}"
+            self.error_detail = f"Conn: {str(e)}"
 
     def get_balance(self):
         if not self.token: return 0.0
@@ -145,6 +148,7 @@ def get_signal(spy_close, monthly, vix_close):
 # [마스터 체크리스트 1, 2, 3, 4, 5] 트레이딩 실행
 # ==========================================
 async def run_trading():
+    # [Claude 조언 반영] 시간 체크를 함수 시작 직후에 수행
     now_kst = datetime.now(KST)
     current_hour = now_kst.hour
     
@@ -152,7 +156,8 @@ async def run_trading():
     token = os.getenv('TELEGRAM_TOKEN'); chat_id = os.getenv('CHAT_ID')
     bot = Bot(token=token) if (Bot and token) else None
     
-    if current_hour == 22: # [체크] 테스트 시 21로 수정 가능
+    # [긴급 테스트용] 현재 밤 10시라면 20을 22로 바꿔서 테스트해보세요
+    if current_hour == 20: 
         spy_ohlc, monthly, vix_close, msg = get_market_data()
         if spy_ohlc.empty:
             if bot: await bot.send_message(chat_id=chat_id, text=f"⚠️ [20:00] 데이터 로드 실패: {msg}")
@@ -185,7 +190,7 @@ async def run_trading():
         if bot: await bot.send_message(chat_id=chat_id, text=f"[20:00] {signal}: {reason}{exec_status}{debug_info}")
 
     elif current_hour == 1:
-        # [마스터 체크리스트 2] 01:00 긴급 탈출 보존
+        # [01:00 긴급 탈출]
         spy_int = yf.download(SIGNAL_TICKER, period='1d', interval='5m', progress=False)
         if not spy_int.empty:
             spy_ret = (float(spy_int['Close'].iloc[-1]) / float(spy_int['Open'].iloc[0])) - 1
@@ -194,15 +199,15 @@ async def run_trading():
                 if qty > 0:
                     trader.send_order(TRADE_TICKER, qty, "SELL")
                     with open(STATE_FILE, 'w') as f: json.dump({"in_market": False, "last_exit_price": float(spy_int['Close'].iloc[-1])}, f)
-                    if bot: await bot.send_message(chat_id=chat_id, text=f"🚨 [01:00 긴급] SPY {spy_ret*100:.1f}% 폭락. 전량 매도.")
+                    if bot: await bot.send_message(chat_id=chat_id, text=f"🚨 [01:00 긴급] SPY {spy_ret*100:.1f}% 폭락. 전량 매도 완료.")
 
 # ==========================================
 # [마스터 체크리스트 6~11] 스트림릿 대시보드
 # ==========================================
 def run_dashboard():
     now_kst = datetime.now(KST)
-    st.set_page_config(page_title="SP500 Watchtower v3.1.2", layout="wide")
-    st.sidebar.title("v3.1.2 Master")
+    st.set_page_config(page_title="SP500 Watchtower v3.1.3", layout="wide")
+    st.sidebar.title("v3.1.3 Master")
     st.sidebar.caption(f"Update: {now_kst.strftime('%H:%M:%S')} KST")
     st.sidebar.divider()
     st.sidebar.write("**EXIT:** VIX+30%, SPY-3%, 3d-5%, 2m Down")
@@ -213,7 +218,7 @@ def run_dashboard():
     if spy_ohlc.empty: st.error(f"❌ 데이터 로드 실패: {msg}"); return
     signal, reason, price, state = get_signal(spy_ohlc['Close'], monthly, vix_close)
     
-    # [마스터 체크리스트 6] 상단 메트릭 카드
+    # 5개 메트릭 카드
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1: st.metric("Position", "IN" if state.get('in_market') else "OUT")
     with c2: st.metric("Signal", signal)
@@ -221,12 +226,11 @@ def run_dashboard():
     with c4: st.metric("Daily Ret", f"{((spy_ohlc['Close'].iloc[-1]/spy_ohlc['Close'].iloc[-2])-1)*100:+.2f}%")
     with c5: st.metric("VIX Value", f"{vix_close.iloc[-1]:.2f}")
 
-    # [마스터 체크리스트 7] 신호별 색상 분기
     if signal == "KEEP": st.success(f"[OK] {reason}")
     elif signal == "EXIT": st.error(f"[EMERGENCY] {reason}")
     else: st.info(f"[INFO] {reason}")
 
-    # [마스터 체크리스트 8] 3단 통합 차트
+    # 3단 통합 차트
     common_idx = spy_ohlc.index.intersection(vix_close.index)
     ohlc_p, vix_p = spy_ohlc.loc[common_idx].tail(126), vix_close.loc[common_idx].tail(126)
     fig = make_subplots(rows=3, cols=1, row_heights=[0.5, 0.25, 0.25], shared_xaxes=True, vertical_spacing=0.05)
@@ -242,12 +246,12 @@ def run_dashboard():
     bt_sp500 = [-0.053,-0.030,0.035,-0.087,-0.006,-0.082,0.092,-0.041,-0.094,0.079,0.054,-0.058,0.062,-0.025,0.035,0.015,-0.001,0.065,0.031,-0.017,-0.048,-0.022,0.087,0.044,0.016,0.052,0.031,-0.041,0.048,0.035,0.011,0.024,0.022,-0.009,0.057,-0.024,-0.012,-0.018,-0.058,-0.082,0.065,0.038,0.042,0.018,0.025,0.031,0.044,0.019,0.008,-0.021,-0.048,0.092]
     dates = [(datetime(2022,1,1) + timedelta(days=31*i)).strftime('%y-%m') for i in range(len(bt_sp500))]
     
-    # [마스터 체크리스트 9] 월별 수익률 바 차트
+    # 월별 수익률 바 차트
     m_fig = go.Figure(go.Bar(x=dates, y=[v*100 for v in bt_sp500], marker_color=['#3fb950' if v > 0 else '#f85149' for v in bt_sp500]))
-    m_fig.update_layout(template='plotly_dark', height=250, margin=dict(l=10,r=10,t=10,b=10), title="Monthly Returns (%)")
+    m_fig.update_layout(template='plotly_dark', height=250, margin=dict(l=10,r=10,t=10,b=10), title="Historical Monthly Returns (%)")
     st.plotly_chart(m_fig, use_container_width=True)
 
-    # [마스터 체크리스트 10] 전략 비교 차트
+    # 전략 비교 차트 (X축 '22-01' 적용)
     st_hist, bh_hist = [100.0], [100.0]
     in_m, c_d, cap_st, cap_bh, spy_p, last_ex_p = True, 0, 100.0, 100.0, 100.0, 100.0
     for r in bt_sp500:
@@ -269,13 +273,12 @@ def run_dashboard():
     c_fig.update_layout(template='plotly_dark', height=300, margin=dict(l=10,r=10,t=10,b=10), yaxis_title="Manwon (Start: 100)")
     st.plotly_chart(c_fig, use_container_width=True)
 
-    # [마스터 체크리스트 15] 동적 리포트
     with st.expander("Strategy Guide & Performance Details"):
         final = st_hist[-1]
         st.write(f"### 📈 Dynamic Total Return: {(final-100):.1f}%")
         st.write(f"Initial: 100 Manwon -> **Final: {final:.0f} Manwon**")
 
-    # [마스터 체크리스트 11] 최하단 히스토리 로그
+    # 최하단 히스토리 로그
     if os.path.exists(HISTORY_FILE):
         st.subheader("📋 History Logs")
         st.dataframe(pd.read_csv(HISTORY_FILE), use_container_width=True, hide_index=True)
