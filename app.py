@@ -157,7 +157,7 @@ async def run_trading():
     bot = Bot(token=token) if (Bot and token) else None
     
     # [긴급 테스트용] 현재 밤 10시라면 20을 22로 바꿔서 테스트해보세요
-    if current_hour == 20: 
+    if current_hour == 22: 
         spy_ohlc, monthly, vix_close, msg = get_market_data()
         if spy_ohlc.empty:
             if bot: await bot.send_message(chat_id=chat_id, text=f"⚠️ [20:00] 데이터 로드 실패: {msg}")
