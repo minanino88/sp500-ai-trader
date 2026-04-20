@@ -30,7 +30,7 @@ STATE_FILE = 'trend_state.json'
 HISTORY_FILE = 'history_trend.csv'
 
 # ==========================================
-# 2. KIS API 클래스 (규격 완전 교정)
+# 2. KIS API 클래스 (무한 가격 추적 엔진)
 # ==========================================
 class KIS_Trader:
     def __init__(self):
@@ -46,28 +46,20 @@ class KIS_Trader:
     def _set_token(self):
         try:
             url = f"{self.base_url}/oauth2/tokenP"
+            # [규격 고정] appsecret 이름표 엄수
             data = {"grant_type": "client_credentials", "appkey": self.app_key, "appsecret": self.app_secret}
             res = requests.post(url, headers={"content-type": "application/json"}, data=json.dumps(data))
             res_data = res.json()
             self.token = res_data.get('access_token')
-            if not self.token:
-                self.error_detail = res_data.get('error_description', res_data.get('msg1', 'Auth Fail'))
-        except Exception as e:
-            self.error_detail = f"Conn: {str(e)}"
+            if not self.token: self.error_detail = f"Auth Fail: {res_data.get('msg1')}"
+        except Exception as e: self.error_detail = f"Conn: {str(e)}"
 
     def get_balance(self):
         if not self.token: return 0.0
         try:
             url = f"{self.base_url}/uapi/overseas-stock/v1/trading/inquire-psamount"
-            headers = {
-                "Content-Type":"application/json", 
-                "authorization":f"Bearer {self.token}", 
-                "appkey":self.app_key, 
-                "appsecret":self.app_secret, 
-                "tr_id":"JTTT3007R",
-                "custtype": "P" # 개인 고객 지정
-            }
-            params = {"CANO": self.cano, "ACNT_PRDT_CD": self.acnt_prdt_cd, "OVRS_EXCG_CD": "AMEX", "OVRS_ORD_UNPR": "1", "ITEM_CD": TRADE_TICKER}
+            headers = {"Content-Type":"application/json", "authorization":f"Bearer {self.token}", "appkey":self.app_key, "appsecret":self.app_secret, "tr_id":"JTTT3007R", "custtype":"P"}
+            params = {"CANO":self.cano, "ACNT_PRDT_CD":self.acnt_prdt_cd, "OVRS_EXCG_CD":"AMEX", "OVRS_ORD_UNPR":"1", "ITEM_CD":TRADE_TICKER}
             res = requests.get(url, headers=headers, params=params).json()
             return float(res.get('output', {}).get('ord_psbl_frcr_amt', 0))
         except: return 0.0
@@ -76,14 +68,7 @@ class KIS_Trader:
         if not self.token: return 0
         try:
             url = f"{self.base_url}/uapi/overseas-stock/v1/trading/inquire-balance"
-            headers = {
-                "Content-Type":"application/json", 
-                "authorization":f"Bearer {self.token}", 
-                "appkey":self.app_key, 
-                "appsecret":self.app_secret, 
-                "tr_id":"JTTT3012R",
-                "custtype": "P"
-            }
+            headers = {"Content-Type":"application/json", "authorization":f"Bearer {self.token}", "appkey":self.app_key, "appsecret":self.app_secret, "tr_id":"JTTT3012R", "custtype":"P"}
             params = {"CANO":self.cano, "ACNT_PRDT_CD":self.acnt_prdt_cd, "OVRS_EXCG_CD":"AMEX", "TR_CRCY_CD":"USD", "CTX_AREA_FK200":"", "CTX_AREA_NK200":""}
             res = requests.get(url, headers=headers, params=params)
             for item in res.json().get('output1', []):
@@ -91,48 +76,43 @@ class KIS_Trader:
             return 0
         except: return 0
 
-    # [핵심 교정] 현재가 정밀 타격 함수
+    # [핵심] 수단과 방법을 가리지 않는 가격 조회 루프
     def get_current_price(self, ticker=TRADE_TICKER):
         if not self.token: return 0.0
-        try:
-            # 1순위: AMS (AMEX), 2순위: NYS (NYSE)
-            for excd in ["AMS", "NYS"]:
-                url = f"{self.base_url}/uapi/overseas-price/v1/quotations/price"
-                headers = {
-                    "Content-Type":"application/json", 
-                    "authorization":f"Bearer {self.token}", 
-                    "appkey":self.app_key, 
-                    "appsecret":self.app_secret, 
-                    "tr_id":"HHDFS00000300",
-                    "custtype": "P"
-                }
-                params = {"AUTH": "", "EXCD": excd, "PDNO": ticker}
-                res = requests.get(url, headers=headers, params=params)
-                if res.status_code == 200 and res.json().get('rt_cd') == '0':
-                    price = float(res.json().get('output', {}).get('last', 0))
-                    if price > 0: return price
-            return 0.0
-        except: return 0.0
+        
+        # 시도해볼 조합 리스트 (URL Path, TR_ID)
+        strategies = [
+            ("/uapi/overseas-price/v1/quotations/price", "HHDFS76240000"),
+            ("/uapi/overseas-price/v1/quotations/price", "HHDFS00000300"),
+            ("/uapi/overseas-stock/v1/quotations/inquire-price", "HHDFS00000300")
+        ]
+        exchanges = ["AMS", "NYS", "NAS"]
+
+        for url_path, tr_id in strategies:
+            url = f"{self.base_url}{url_path}"
+            for excd in exchanges:
+                try:
+                    headers = {"Content-Type":"application/json", "authorization":f"Bearer {self.token}", "appkey":self.app_key, "appsecret":self.app_secret, "tr_id":tr_id, "custtype":"P"}
+                    res = requests.get(url, headers=headers, params={"AUTH":"", "EXCD":excd, "PDNO":ticker}, timeout=5)
+                    if res.status_code == 200:
+                        data = res.json()
+                        price = float(data.get('output', {}).get('last', 0))
+                        if price > 0: return price
+                except: continue
+        return 0.0
 
     def send_order(self, ticker, qty, side="BUY"):
         if not self.token: return {"rt_cd": "1", "rt_msg": "No Token"}
         try:
             url = f"{self.base_url}/uapi/overseas-stock/v1/trading/order"
             tr_id = "JTTT1002U" if side == "BUY" else "JTTT1006U"
-            headers = {
-                "Content-Type":"application/json", 
-                "authorization":f"Bearer {self.token}", 
-                "appkey":self.app_key, 
-                "appsecret":self.app_secret, 
-                "tr_id":tr_id,
-                "custtype": "P"
-            }
+            headers = {"Content-Type":"application/json", "authorization":f"Bearer {self.token}", "appkey":self.app_key, "appsecret":self.app_secret, "tr_id":tr_id, "custtype":"P"}
             data = {"CANO":self.cano, "ACNT_PRDT_CD":self.acnt_prdt_cd, "OVRS_EXGI":"AMEX", "PDNO":ticker, "ORD_QTY":str(qty), "ORD_DVP":"00", "ORD_UNPR":"0"}
             return requests.post(url, headers=headers, data=json.dumps(data)).json()
-        except: return {"rt_cd": "1", "rt_msg": "Network Error"}
+        except: return {"rt_cd":"1", "rt_msg":"Net Error"}
 
 # ==========================================
-# 3. 데이터 엔진 & 지능형 신호 (마스터 체크리스트 준수)
+# 3. 데이터 엔진 & 백테스트 (체크리스트 준수)
 # ==========================================
 def get_market_data():
     try:
@@ -144,9 +124,7 @@ def get_market_data():
         if spy_raw.empty or vix_raw.empty: return pd.DataFrame(), pd.Series(), pd.Series(), "Data Empty"
         if isinstance(spy_raw.columns, pd.MultiIndex): spy_raw.columns = spy_raw.columns.get_level_values(0)
         if isinstance(vix_raw.columns, pd.MultiIndex): vix_raw.columns = vix_raw.columns.get_level_values(0)
-        spy_close, vix_close = spy_raw['Close'], vix_raw['Close']
-        monthly = spy_close.resample('ME').last().pct_change().dropna()
-        return spy_raw, monthly, vix_close, "Success"
+        return spy_raw, spy_raw['Close'].resample('ME').last().pct_change().dropna(), vix_raw['Close'], "Success"
     except Exception as e: return pd.DataFrame(), pd.Series(), pd.Series(), str(e)
 
 def get_signal(spy_close, monthly, vix_close):
@@ -175,78 +153,51 @@ def get_signal(spy_close, monthly, vix_close):
         return "WAIT", f"Waiting({rebound*100:.1f}%)", curr_p, state
 
 # ==========================================
-# 4. 트레이딩 실행 (20:00 / 01:00)
+# 4. 트레이딩 실행 (시간: 21일 00시 대응)
 # ==========================================
 async def run_trading():
     now_kst = dt.now(KST)
     current_hour = now_kst.hour
     
     trader = KIS_Trader()
-    token = os.getenv('TELEGRAM_TOKEN'); chat_id = os.getenv('CHAT_ID')
-    bot = Bot(token=token) if (Bot and token) else None
+    token_val = os.getenv('TELEGRAM_TOKEN'); chat_id = os.getenv('CHAT_ID')
+    bot = Bot(token=token_val) if (Bot and token_val) else None
     
-    # [민환님 가이드] 현재 밤 23시 58분이므로 23시 조건으로 개방
-    if current_hour == 23: 
+    # [민환님 가이드] 현재 시간 00시이므로 테스트를 위해 0으로 설정
+    if current_hour == 0: 
         spy_ohlc, monthly, vix_close, msg = get_market_data()
         if spy_ohlc.empty:
             if bot: await bot.send_message(chat_id=chat_id, text=f"⚠️ 데이터 로드 실패: {msg}")
             return
         
-        signal, reason, price, state = get_signal(spy_ohlc['Close'], monthly, vix_close)
-        
-        # [1] 잔고 조회 (확정 사양)
+        signal, reason, price_val, state = get_signal(spy_ohlc['Close'], monthly, vix_close)
         bal = trader.get_balance()
-        if bot: await bot.send_message(chat_id=chat_id, text=f"🔍 BAL_DEBUG: {bal:.2f} USD 확인")
-
-        # [2] 현재가 정밀 스캔 (교정된 URL + Header)
-        cur_p = 0.0
-        for excd in ["AMS", "NYS"]:
-            url_p = f"{trader.base_url}/uapi/overseas-price/v1/quotations/price"
-            headers_p = {
-                "Content-Type":"application/json", 
-                "authorization":f"Bearer {trader.token}", 
-                "appkey":trader.app_key, 
-                "appsecret":trader.app_secret, 
-                "tr_id":"HHDFS00000300",
-                "custtype": "P"
-            }
-            res_p = requests.get(url_p, headers=headers_p, params={"AUTH":"", "EXCD":excd, "PDNO":TRADE_TICKER})
-            
-            if res_p.status_code == 200:
-                data_p = res_p.json()
-                last_p = data_p.get('output', {}).get('last', '없음')
-                if bot: await bot.send_message(chat_id=chat_id, text=f"PRICE_DEBUG {excd}: rt={data_p.get('rt_cd')} last={last_p}")
-                if data_p.get('rt_cd') == '0' and last_p != '없음':
-                    cur_p = float(last_p)
-                    break
-            else:
-                if bot: await bot.send_message(chat_id=chat_id, text=f"PRICE_DEBUG {excd}: HTTP {res_p.status_code}")
-
+        cur_p = trader.get_current_price(TRADE_TICKER)
         qty = trader.get_holdings(TRADE_TICKER)
-        exec_status = ""
         
+        # [디버그 보고]
+        if bot: await bot.send_message(chat_id=chat_id, text=f"🔍 FINAL_DEBUG: bal={bal:.1f} | price={cur_p:.2f} | token={'OK' if trader.token else 'FAIL'}")
+        
+        exec_status = ""
         if signal in ["KEEP", "RE-ENTER"] and qty == 0:
             if cur_p > 0:
                 buy_qty = int((bal * 0.95) / cur_p)
                 if buy_qty >= 1:
-                    res_ord = trader.send_order(TRADE_TICKER, buy_qty, "BUY")
-                    if res_ord.get('rt_cd') == '0':
+                    res = trader.send_order(TRADE_TICKER, buy_qty, "BUY")
+                    if res.get('rt_cd') == '0':
                         exec_status = f" | ✅ 매수성공: {buy_qty}주"
                         with open(STATE_FILE, 'w') as f: json.dump({"in_market": True, "last_exit_price": 0}, f)
-                    else: exec_status = f" | ❌ 매수실패: {res_ord.get('rt_msg')}"
+                    else: exec_status = f" | ❌ 매수실패: {res.get('rt_msg')}"
                 else: exec_status = f" | ⚠️ 수량부족"
             else: exec_status = " | ⚠️ 가격조회불가"
         elif signal == "EXIT" and qty > 0:
-            res_ord = trader.send_order(TRADE_TICKER, qty, "SELL")
-            if res_ord.get('rt_cd') == '0':
+            res = trader.send_order(TRADE_TICKER, qty, "SELL")
+            if res.get('rt_cd') == '0':
                 exec_status = f" | ✅ 매도성공: {qty}주"
-                with open(STATE_FILE, 'w') as f: json.dump({"in_market": False, "last_exit_price": price}, f)
-            else: exec_status = f" | ❌ 매도실패: {res_ord.get('rt_msg')}"
+                with open(STATE_FILE, 'w') as f: json.dump({"in_market": False, "last_exit_price": price_val}, f)
+            else: exec_status = f" | ❌ 매도실패: {res.get('rt_msg')}"
 
-        # 최종 보고
-        token_status = "OK" if trader.token else "FAIL"
-        debug_info = f"\nqty={qty} | bal={bal:.1f} | price={cur_p:.2f} | token={token_status}"
-        if bot: await bot.send_message(chat_id=chat_id, text=f"[20:00] {signal}: {reason}{exec_status}{debug_info}")
+        if bot: await bot.send_message(chat_id=chat_id, text=f"[{now_kst.strftime('%H:%M')}] {signal}: {reason}{exec_status}\nqty={qty}|bal={bal:.1f}|p={cur_p:.2f}")
 
     elif current_hour == 1:
         spy_int = yf.download(SIGNAL_TICKER, period='1d', interval='5m', progress=False)
@@ -264,8 +215,8 @@ async def run_trading():
 # ==========================================
 def run_dashboard():
     now_kst = dt.now(KST)
-    st.set_page_config(page_title="SP500 Watchtower v3.3.1", layout="wide")
-    st.sidebar.title("v3.3.1 Master")
+    st.set_page_config(page_title="SP500 Watchtower v3.3.2", layout="wide")
+    st.sidebar.title("v3.3.2 Master")
     st.sidebar.caption(f"Update: {now_kst.strftime('%H:%M:%S')} KST")
     st.sidebar.divider()
     st.sidebar.write("**EXIT:** VIX+30%, SPY-3%, 3d-5%, 2m Down")
@@ -287,7 +238,6 @@ def run_dashboard():
     elif signal == "EXIT": st.error(f"[EMERGENCY] {reason}")
     else: st.info(f"[INFO] {reason}")
 
-    # 시장 차트
     common_idx = spy_ohlc.index.intersection(vix_close.index)
     ohlc_p, vix_p = spy_ohlc.loc[common_idx].tail(126), vix_close.loc[common_idx].tail(126)
     fig = make_subplots(rows=3, cols=1, row_heights=[0.5, 0.25, 0.25], shared_xaxes=True, vertical_spacing=0.05)
@@ -327,17 +277,15 @@ def run_dashboard():
     c_fig.update_layout(template='plotly_dark', height=300, margin=dict(l=10,r=10,t=10,b=10), yaxis_title="Manwon (Start: 100)")
     st.plotly_chart(c_fig, use_container_width=True)
 
-    with st.expander("Strategy Guide & Performance Details"):
-        final = st_hist[-1]
-        st.write(f"### 📈 Dynamic Total Return: {(final-100):.1f}%")
-        st.write(f"Initial: 100 Manwon -> **Final: {final:.0f} Manwon**")
+    with st.expander("Strategy Performance"):
+        st.write(f"### 📈 Total Return: {(st_hist[-1]-100):.1f}%")
 
     if os.path.exists(HISTORY_FILE):
         st.subheader("📋 History Logs")
         st.dataframe(pd.read_csv(HISTORY_FILE), use_container_width=True, hide_index=True)
 
 # ==========================================
-# 6. 진입점
+# 6. 진입점 (Actions 대응)
 # ==========================================
 if os.getenv('GITHUB_ACTIONS') == 'true':
     asyncio.run(run_trading())
