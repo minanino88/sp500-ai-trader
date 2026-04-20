@@ -12,6 +12,7 @@ from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 import warnings
 
+# [보존] telegram 라이브러리 예외 처리
 try:
     from telegram import Bot
 except ImportError:
@@ -23,9 +24,6 @@ warnings.filterwarnings('ignore')
 # 1. 공정 설정
 # ==========================================
 KST = pytz.timezone('Asia/Seoul')
-now_kst = datetime.now(KST)
-current_hour = now_kst.hour
-
 SIGNAL_TICKER = 'SPY' 
 TRADE_TICKER = 'UPRO'
 STATE_FILE = 'trend_state.json'
@@ -90,7 +88,7 @@ class KIS_Trader:
         except: return {"rt_cd": "1", "rt_msg": "Network Error"}
 
 # ==========================================
-# 3. 데이터 엔진 & 지능형 신호 (보존)
+# 3. 데이터 엔진 & 지능형 신호
 # ==========================================
 def get_market_data():
     try:
@@ -133,9 +131,13 @@ def get_signal(spy_close, monthly, vix_close):
         return "WAIT", f"Waiting({rebound*100:.1f}%)", curr_p, state
 
 # ==========================================
-# 4. 트레이딩 실행 (결과 보고 + 디버그 강화)
+# 4. 트레이딩 실행 (시간 오차 해결 버전)
 # ==========================================
 async def run_trading():
+    # [중요] 시간 체크를 함수 시작 직후에 수행하여 지연 시간 상쇄
+    now_kst = datetime.now(KST)
+    current_hour = now_kst.hour
+    
     trader = KIS_Trader()
     token = os.getenv('TELEGRAM_TOKEN'); chat_id = os.getenv('CHAT_ID')
     bot = Bot(token=token) if (Bot and token) else None
@@ -145,15 +147,11 @@ async def run_trading():
         if spy_ohlc.empty:
             if bot: await bot.send_message(chat_id=chat_id, text=f"⚠️ [20:00] 데이터 로드 실패: {msg}")
             return
-            
         signal, reason, price, state = get_signal(spy_ohlc['Close'], monthly, vix_close)
         qty = trader.get_holdings(TRADE_TICKER)
         exec_status = ""
-
-        # 매수/매도 판단 실행
         if signal in ["KEEP", "RE-ENTER"] and qty == 0:
-            bal = trader.get_balance()
-            cur_p = trader.get_current_price(TRADE_TICKER)
+            bal = trader.get_balance(); cur_p = trader.get_current_price(TRADE_TICKER)
             if cur_p > 0:
                 buy_qty = int((bal * 0.95) / cur_p)
                 if buy_qty >= 1:
@@ -161,10 +159,8 @@ async def run_trading():
                     if res.get('rt_cd') == '0':
                         exec_status = f" | ✅ 매수성공: {buy_qty}주"
                         with open(STATE_FILE, 'w') as f: json.dump({"in_market": True, "last_exit_price": 0}, f)
-                    else:
-                        exec_status = f" | ❌ 매수실패: {res.get('rt_msg')}"
+                    else: exec_status = f" | ❌ 매수실패: {res.get('rt_msg')}"
                 else: exec_status = " | ⚠️ 잔고부족"
-            else: exec_status = " | ⚠️ 가격조회불가"
         elif signal == "EXIT" and qty > 0:
             res = trader.send_order(TRADE_TICKER, qty, "SELL")
             if res.get('rt_cd') == '0':
@@ -172,12 +168,11 @@ async def run_trading():
                 with open(STATE_FILE, 'w') as f: json.dump({"in_market": False, "last_exit_price": price}, f)
             else: exec_status = f" | ❌ 매도실패: {res.get('rt_msg')}"
 
-        # [수정] 디버그 정보 추가
+        # 디버그 보고 강화
         debug_info = f"\nqty={qty} | bal={trader.get_balance():.1f} | price={trader.get_current_price(TRADE_TICKER):.2f} | token={'OK' if trader.token else 'FAIL'}"
         if bot: await bot.send_message(chat_id=chat_id, text=f"[20:00] {signal}: {reason}{exec_status}{debug_info}")
 
     elif current_hour == 1:
-        # [01:00 긴급 로직 보존]
         spy_int = yf.download(SIGNAL_TICKER, period='1d', interval='5m', progress=False)
         if not spy_int.empty:
             spy_ret = (float(spy_int['Close'].iloc[-1]) / float(spy_int['Open'].iloc[0])) - 1
@@ -189,12 +184,13 @@ async def run_trading():
                     if bot: await bot.send_message(chat_id=chat_id, text=f"🚨 [01:00 긴급탈출] SPY {spy_ret*100:.1f}%. 전량 매도.")
 
 # ==========================================
-# 5. 스트림릿 대시보드 (전 기능 통합)
+# 5. 스트림릿 대시보드
 # ==========================================
 def run_dashboard():
-    st.set_page_config(page_title="SP500 Watchtower v3.0.8", layout="wide")
-    st.sidebar.title("v3.0.8 Master")
-    st.sidebar.caption(f"Last Update: {now_kst.strftime('%Y-%m-%d %H:%M:%S')} KST")
+    now_kst = datetime.now(KST)
+    st.set_page_config(page_title="SP500 Watchtower v3.0.9", layout="wide")
+    st.sidebar.title("v3.0.9 Master")
+    st.sidebar.caption(f"Update: {now_kst.strftime('%H:%M:%S')} KST")
     st.sidebar.divider()
     st.sidebar.write("**EXIT:** VIX+30%, SPY-3%, 3d-5%, 2m Down")
     st.sidebar.write("**ENTER:** VIX Reversal, +2% Rebound")
@@ -204,7 +200,6 @@ def run_dashboard():
     if spy_ohlc.empty: st.error(f"❌ 데이터 로드 실패: {msg}"); return
     signal, reason, price, state = get_signal(spy_ohlc['Close'], monthly, vix_close)
     
-    # 지표 카드 & 신호별 색상 분기
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1: st.metric("Position", "IN" if state.get('in_market') else "OUT")
     with c2: st.metric("Signal", signal)
@@ -216,7 +211,7 @@ def run_dashboard():
     elif signal == "EXIT": st.error(f"[EMERGENCY] {reason}")
     else: st.info(f"[INFO] {reason}")
 
-    # 3단 통합 차트 (Candle + VIX + Vol)
+    # 시장 차트
     common_idx = spy_ohlc.index.intersection(vix_close.index)
     ohlc_p, vix_p = spy_ohlc.loc[common_idx].tail(126), vix_close.loc[common_idx].tail(126)
     fig = make_subplots(rows=3, cols=1, row_heights=[0.5, 0.25, 0.25], shared_xaxes=True, vertical_spacing=0.05)
@@ -240,36 +235,33 @@ def run_dashboard():
             if r < 0: c_d += 1
             else: c_d = 0
             if c_d >= 2: in_m, last_ex_p, ret_st = False, spy_p, 0
-            else: ret_st = r * 3 - 0.001
+            else: ret_st = r * 3 - 0.001 # 3x leverage with 0.1% monthly cost
         else:
             rebound = (spy_p - last_ex_p) / last_ex_p
             if rebound >= 0.02: in_m, c_d, ret_st = True, 0, r * 3 - 0.001
             else: ret_st = 0
         cap_st *= (1 + ret_st); st_hist.append(cap_st)
 
-    # 월별 수익률 & 전략 비교 차트
-    m_fig = go.Figure(go.Bar(x=dates, y=[v*100 for v in bt_sp500], marker_color=['green' if v > 0 else 'red' for v in bt_sp500]))
-    m_fig.update_layout(template='plotly_dark', height=200, margin=dict(l=10,r=10,t=10,b=10))
-    st.plotly_chart(m_fig, use_container_width=True)
-
     c_fig = go.Figure()
-    c_fig.add_trace(go.Scatter(x=['22-01']+dates, y=st_hist, name='Strategy (UPRO)', line=dict(color='#3fb950', width=2)))
+    c_fig.add_trace(go.Scatter(x=['22-01']+dates, y=st_hist, name='Strategy', line=dict(color='#3fb950', width=2)))
     c_fig.add_trace(go.Scatter(x=['22-01']+dates, y=bh_hist, name='SPY B&H', line=dict(color='gray', dash='dash')))
     c_fig.update_layout(template='plotly_dark', height=300, margin=dict(l=10,r=10,t=10,b=10))
     st.plotly_chart(c_fig, use_container_width=True)
 
     with st.expander("Strategy Guide & Performance Details"):
+        # [수정] 하드코딩 제거: 실제 st_hist 기반 동적 계산
         final = st_hist[-1]
-        st.write(f"### 📈 Dynamic Total Return: {final-100:.1f}%")
+        st.write(f"### 📈 Dynamic Total Return: {(final-100):.1f}%")
         st.write(f"Initial: 100 Manwon -> **Final: {final:.0f} Manwon**")
+        st.divider()
+        st.write("EXIT: 2m Down Exit / 2% Rebound Enter / VIX Peak Out")
 
-    # 히스토리 로그 테이블
     if os.path.exists(HISTORY_FILE):
         st.subheader("📋 History Logs")
         st.dataframe(pd.read_csv(HISTORY_FILE), use_container_width=True, hide_index=True)
 
 # ==========================================
-# 6. 진입점 (GitHub Actions 대응)
+# 6. 진입점
 # ==========================================
 if os.getenv('GITHUB_ACTIONS') == 'true':
     asyncio.run(run_trading())
