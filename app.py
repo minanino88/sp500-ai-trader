@@ -29,7 +29,7 @@ STATE_FILE = 'trend_state.json'
 HISTORY_FILE = 'history_trend.csv'
 
 # ==========================================
-# [체크리스트 2] KIS API 클래스 (잔고 전수 조사 로직)
+# [체크리스트 2] KIS API 클래스
 # ==========================================
 class KIS_Trader:
     def __init__(self):
@@ -45,58 +45,14 @@ class KIS_Trader:
     def _set_token(self):
         try:
             url = f"{self.base_url}/oauth2/tokenP"
-            data = {
-                "grant_type": "client_credentials", 
-                "appkey": self.app_key, 
-                "appsecret": self.app_secret 
-            }
+            data = {"grant_type": "client_credentials", "appkey": self.app_key, "appsecret": self.app_secret}
             res = requests.post(url, headers={"content-type": "application/json"}, data=json.dumps(data))
             res_data = res.json()
             self.token = res_data.get('access_token')
             if not self.token:
-                self.error_detail = res_data.get('error_description', res_data.get('msg1', 'Auth Error'))
+                self.error_detail = res_data.get('error_description', res_data.get('msg1', 'Auth Fail'))
         except Exception as e:
             self.error_detail = f"Conn: {str(e)}"
-
-    def get_balance(self):
-        if not self.token: return 0.0
-        try:
-            url = f"{self.base_url}/uapi/overseas-stock/v1/trading/inquire-balance"
-            headers = {
-                "Content-Type":"application/json", 
-                "authorization":f"Bearer {self.token}", 
-                "appkey":self.app_key, 
-                "appsecret":self.app_secret, 
-                "tr_id":"JTTT3012R"
-            }
-            params = {
-                "CANO":self.cano, 
-                "ACNT_PRDT_CD":self.acnt_prdt_cd, 
-                "OVRS_EXGI":"NAS", 
-                "TR_CRC_CYCD":"USD", 
-                "CTX_AREA_FK200":"", 
-                "CTX_AREA_NK200":""
-            }
-            res = requests.get(url, headers=headers, params=params)
-            res_json = res.json()
-            
-            if res_json.get('rt_cd') != '0':
-                self.error_detail = f"Bal: {res_json.get('msg1')}"
-                return 0.0
-            
-            out2 = res_json.get('output2', {})
-            # [핵심 수정] 708달러를 찾기 위해 관련 모든 필드를 검사합니다.
-            # 1. 외화예수금액2 (frcr_dncl_amt_2)
-            # 2. 해외주식직접매수발주가능금액 (ovrs_stck_drct_buy_psbl_amt)
-            # 3. 나스닥주문가능금액 (nass_pstb_amt)
-            
-            b1 = float(out2.get('frcr_dncl_amt_2', 0))
-            b2 = float(out2.get('ovrs_stck_drct_buy_psbl_amt', 0))
-            b3 = float(out2.get('nass_pstb_amt', 0))
-            
-            # 셋 중 가장 큰 금액을 실제 가용 잔고로 채택
-            return max(b1, b2, b3)
-        except: return 0.0
 
     def get_holdings(self, ticker=TRADE_TICKER):
         if not self.token: return 0
@@ -174,7 +130,7 @@ def get_signal(spy_close, monthly, vix_close):
         return "WAIT", f"Waiting({rebound*100:.1f}%)", curr_p, state
 
 # ==========================================
-# [체크리스트 1~5] 트레이딩 실행 (20:00 / 01:00)
+# [체크리스트 1~5] 트레이딩 실행 (디버그 강화)
 # ==========================================
 async def run_trading():
     now_kst = datetime.now(KST)
@@ -184,18 +140,33 @@ async def run_trading():
     token = os.getenv('TELEGRAM_TOKEN'); chat_id = os.getenv('CHAT_ID')
     bot = Bot(token=token) if (Bot and token) else None
     
-    # [민환님 테스트 가이드] 20:00 외에 테스트 시 아래 숫자를 현재 시간으로 바꿔서 Push하세요
+    # [민환님 가이드] 현재 밤 10시라면 22시로 설정
     if current_hour == 22: 
         spy_ohlc, monthly, vix_close, msg = get_market_data()
         if spy_ohlc.empty:
-            if bot: await bot.send_message(chat_id=chat_id, text=f"⚠️ [20:00] 데이터 로드 실패: {msg}")
+            if bot: await bot.send_message(chat_id=chat_id, text=f"⚠️ 데이터 로드 실패: {msg}")
             return
+        
         signal, reason, price, state = get_signal(spy_ohlc['Close'], monthly, vix_close)
         qty = trader.get_holdings(TRADE_TICKER)
-        exec_status = ""
         
+        # [수정] 민환님이 요청하신 잔고 원문 디버깅 섹션
+        url = f"{trader.base_url}/uapi/overseas-stock/v1/trading/inquire-balance"
+        headers = {"Content-Type":"application/json", "authorization":f"Bearer {trader.token}", "appkey":trader.app_key, "appsecret":trader.app_secret, "tr_id":"JTTT3012R"}
+        params = {"CANO":trader.cano, "ACNT_PRDT_CD":trader.acnt_prdt_cd, "OVRS_EXGI":"NAS", "TR_CRC_CYCD":"USD", "CTX_AREA_FK200":"", "CTX_AREA_NK200":""}
+        
+        bal_res = requests.get(url, headers=headers, params=params).json()
+        out2_data = bal_res.get('output2', {})
+        
+        # 텔레그램으로 output2 원문 송신 (첫 500자)
+        if bot: await bot.send_message(chat_id=chat_id, text=f"🔍 BAL_DEBUG (Raw):\n{str(out2_data)[:500]}")
+        
+        # 잔고 설정 (민환님 지정 필드)
+        bal = float(out2_data.get('frcr_dncl_amt_2', 0))
+        
+        exec_status = ""
         if signal in ["KEEP", "RE-ENTER"] and qty == 0:
-            bal = trader.get_balance(); cur_p = trader.get_current_price(TRADE_TICKER)
+            cur_p = trader.get_current_price(TRADE_TICKER)
             if cur_p > 0:
                 buy_qty = int((bal * 0.95) / cur_p)
                 if buy_qty >= 1:
@@ -212,13 +183,12 @@ async def run_trading():
                 with open(STATE_FILE, 'w') as f: json.dump({"in_market": False, "last_exit_price": price}, f)
             else: exec_status = f" | ❌ 매도실패: {res.get('rt_msg')}"
 
-        # [체크리스트 4] 디버그 보고 강화
-        token_status = "OK" if trader.token else f"FAIL({trader.error_detail})"
-        debug_info = f"\nqty={qty} | bal={trader.get_balance():.1f} | price={trader.get_current_price(TRADE_TICKER):.2f} | token={token_status}"
+        # [체크리스트 4] 최종 보고
+        token_status = "OK" if trader.token else "FAIL"
+        debug_info = f"\nqty={qty} | bal={bal:.1f} | price={trader.get_current_price(TRADE_TICKER):.2f} | token={token_status}"
         if bot: await bot.send_message(chat_id=chat_id, text=f"[20:00] {signal}: {reason}{exec_status}{debug_info}")
 
     elif current_hour == 1:
-        # [체크리스트 2] 01:00 긴급 탈출
         spy_int = yf.download(SIGNAL_TICKER, period='1d', interval='5m', progress=False)
         if not spy_int.empty:
             spy_ret = (float(spy_int['Close'].iloc[-1]) / float(spy_int['Open'].iloc[0])) - 1
@@ -227,15 +197,15 @@ async def run_trading():
                 if qty > 0:
                     trader.send_order(TRADE_TICKER, qty, "SELL")
                     with open(STATE_FILE, 'w') as f: json.dump({"in_market": False, "last_exit_price": float(spy_int['Close'].iloc[-1])}, f)
-                    if bot: await bot.send_message(chat_id=chat_id, text=f"🚨 [01:00 긴급] 폭락 전량매도 완료")
+                    if bot: await bot.send_message(chat_id=chat_id, text="🚨 [01:00 긴급] 전량 매도 완료")
 
 # ==========================================
-# [체크리스트 6~11] 스트림릿 대시보드
+# [체크리스트 6~11] 스트림릿 대시보드 (통합본)
 # ==========================================
 def run_dashboard():
     now_kst = datetime.now(KST)
-    st.set_page_config(page_title="SP500 Watchtower v3.1.5", layout="wide")
-    st.sidebar.title("v3.1.5 Master")
+    st.set_page_config(page_title="SP500 Watchtower v3.1.6", layout="wide")
+    st.sidebar.title("v3.1.6 Master")
     st.sidebar.caption(f"Update: {now_kst.strftime('%H:%M:%S')} KST")
     st.sidebar.divider()
     st.sidebar.write("**EXIT:** VIX+30%, SPY-3%, 3d-5%, 2m Down")
@@ -265,8 +235,7 @@ def run_dashboard():
     fig.add_trace(go.Candlestick(x=ohlc_p.index, open=ohlc_p['Open'], high=ohlc_p['High'], low=ohlc_p['Low'], close=ohlc_p['Close'], name='SPY'), row=1, col=1)
     fig.add_trace(go.Bar(x=vix_p.index, y=vix_p.values, name='VIX', marker_color='orange'), row=2, col=1)
     fig.add_trace(go.Bar(x=ohlc_p.index, y=ohlc_p['Volume'], name='Vol', marker_color='blue'), row=3, col=1)
-    fig.update_layout(template='plotly_dark', height=500, margin=dict(l=10,r=10,t=10,b=10), showlegend=False)
-    fig.update_xaxes(rangeslider_visible=False)
+    fig.update_layout(template='plotly_dark', height=500, margin=dict(l=10,r=10,t=10,b=10), showlegend=False, xaxis_rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
 
     st.divider()
@@ -301,6 +270,7 @@ def run_dashboard():
     c_fig.update_layout(template='plotly_dark', height=300, margin=dict(l=10,r=10,t=10,b=10))
     st.plotly_chart(c_fig, use_container_width=True)
 
+    # 동적 리포트
     with st.expander("Strategy Guide & Performance Details"):
         final = st_hist[-1]
         st.write(f"### 📈 Dynamic Total Return: {(final-100):.1f}%")
