@@ -96,10 +96,10 @@ class KIS_Trader:
                 "ORD_QTY": clean_qty, "ORD_DVP": "01", "ORD_UNPR": "0"
             }
             return requests.post(url, headers=headers, data=json.dumps(data)).json()
-        except: return {"rt_cd": "1", "rt_msg": "Net Error"}
+        except Exception as e: return {"rt_cd": "1", "rt_msg": str(e)}
 
 # ==========================================
-# 3. 데이터 엔진 & 지능형 신호 (Float 교정 적용)
+# 3. 데이터 엔진 & 지능형 신호 (Float 교정 무결성)
 # ==========================================
 def get_market_data():
     try:
@@ -118,13 +118,11 @@ def get_signal(spy_close, monthly, vix_close):
     else: state = {"in_market": True, "last_exit_price": 0}
     if spy_close.empty or len(spy_close) < 20: return "WAIT", "Loading", 0.0, state
     
-    # [수정] 민환님 요청: Series Ambiguous 에러 해결을 위한 float() 명시적 변환
     curr_p = float(spy_close.iloc[-1])
     spy_daily_ret = float((spy_close.iloc[-1] / spy_close.iloc[-2]) - 1)
     vix_daily_ret = float((vix_close.iloc[-1] / vix_close.iloc[-2]) - 1)
     spy_3day_ret = float((spy_close.iloc[-1] / spy_close.iloc[-4]) - 1) if len(spy_close) >= 4 else 0.0
     
-    # [수정] 비교 로직에 float 적용
     if vix_daily_ret >= 0.3 or spy_daily_ret <= -0.03 or spy_3day_ret <= -0.05:
         return "EXIT", "Shock Trigger", curr_p, state
     
@@ -133,7 +131,6 @@ def get_signal(spy_close, monthly, vix_close):
         if len(recent) == 2 and recent[0] < 0 and recent[1] < 0: return "EXIT", "2m Down", curr_p, state
         return "KEEP", "Holding", curr_p, state
     else:
-        # [VIX 역발상 재진입 로직 사수]
         rebound = (curr_p - state['last_exit_price']) / state['last_exit_price'] if state['last_exit_price'] > 0 else 0
         vix_now, vix_prev = float(vix_close.iloc[-1]), float(vix_close.iloc[-2])
         vix_20d = vix_close.tail(20)
@@ -144,7 +141,7 @@ def get_signal(spy_close, monthly, vix_close):
         return "WAIT", f"Waiting({rebound*100:.1f}%)", curr_p, state
 
 # ==========================================
-# 4. 트레이딩 실행 (20시, 01시 운영)
+# 4. 트레이딩 실행 (수정: 디버깅용 응답 전수 노출)
 # ==========================================
 async def run_trading():
     now_kst = dt.now(KST); current_hour = now_kst.hour
@@ -152,7 +149,7 @@ async def run_trading():
     bot = Bot(token=token_v) if (Bot and token_v) else None
     
     # 20:00(정규) 또는 01:00(비상) 가동
-    if current_hour == 1: 
+    if current_hour == 20 or current_hour == 1: 
         spy_ohlc, monthly, vix_close, msg = get_market_data()
         if spy_ohlc.empty: return
         signal, reason, price_val, state = get_signal(spy_ohlc['Close'], monthly, vix_close)
@@ -168,13 +165,18 @@ async def run_trading():
                     exec_status = f" | ✅ 매수성공: {buy_qty}주"
                     with open(STATE_FILE, 'w') as f: json.dump({"in_market": True, "last_exit_price": 0}, f)
                     pd.DataFrame([{"Date": now_kst.strftime("%Y-%m-%d %H:%M"), "Action": "BUY", "Qty": buy_qty, "Price": cur_p}]).to_csv(HISTORY_FILE, mode='a', header=not os.path.exists(HISTORY_FILE), index=False)
-                else: exec_status = f" | ❌ 매수실패: {res_ord.get('rt_msg')}"
+                else: 
+                    # [수정] 민환님 요청: 매수 실패 시 응답 전체(200자) 노출
+                    exec_status = f" | ❌ 매수실패: {str(res_ord)[:200]}"
         elif signal == "EXIT" and qty > 0:
             res_ord = trader.send_order(TRADE_TICKER, qty, "SELL")
             if res_ord.get('rt_cd') == '0':
                 exec_status = f" | ✅ 매도성공: {qty}주"
                 with open(STATE_FILE, 'w') as f: json.dump({"in_market": False, "last_exit_price": price_val}, f)
                 pd.DataFrame([{"Date": now_kst.strftime("%Y-%m-%d %H:%M"), "Action": "SELL", "Qty": qty, "Price": cur_p}]).to_csv(HISTORY_FILE, mode='a', header=not os.path.exists(HISTORY_FILE), index=False)
+            else:
+                # [수정] 매도 실패 시에도 응답 전체 노출
+                exec_status = f" | ❌ 매도실패: {str(res_ord)[:200]}"
 
         if bot: await bot.send_message(chat_id=chat_id, text=f"[{now_kst.strftime('%H:%M')}] {signal}: {reason}{exec_status}\nUPRO: ${cur_p:.2f}")
 
@@ -188,14 +190,13 @@ async def run_trading():
                 if bot: await bot.send_message(chat_id=chat_id, text="🚨 [01:00 긴급] SPY 폭락 대응 전량 매도")
 
 # ==========================================
-# 5. 스트림릿 대시보드 (전 기능 무결성 통합)
+# 5. 스트림릿 대시보드 (15개 마스터 스펙 준수)
 # ==========================================
 def run_dashboard():
     now_kst = dt.now(KST)
-    st.set_page_config(page_title="SP500 Watchtower v3.6.2", layout="wide")
+    st.set_page_config(page_title="SP500 Watchtower v3.6.3", layout="wide")
     
-    # [사이드바]
-    st.sidebar.title("v3.6.2 Master")
+    st.sidebar.title("v3.6.3 Debug Master")
     st.sidebar.caption(f"Update: {now_kst.strftime('%H:%M:%S')} KST")
     st.sidebar.divider()
     st.sidebar.write("**EXIT:** VIX+30%, SPY-3%, 3d-5%, 2m Down")
@@ -214,7 +215,6 @@ def run_dashboard():
     with c4: st.metric("Daily Ret", f"{((spy_ohlc['Close'].iloc[-1]/spy_ohlc['Close'].iloc[-2])-1)*100:+.2f}%")
     with c5: st.metric("VIX Value", f"{vix_close.iloc[-1]:.2f}")
 
-    # 신호별 색상 강조
     if signal == "KEEP": st.success(f"[OK] {reason}")
     elif signal == "EXIT": st.error(f"[EMERGENCY] {reason}")
     else: st.info(f"[INFO] {reason}")
@@ -232,12 +232,12 @@ def run_dashboard():
     bt_sp500 = [-0.053,-0.030,0.035,-0.087,-0.006,-0.082,0.092,-0.041,-0.094,0.079,0.054,-0.058,0.062,-0.025,0.035,0.015,-0.001,0.065,0.031,-0.017,-0.048,-0.022,0.087,0.044,0.016,0.052,0.031,-0.041,0.048,0.035,0.011,0.024,0.022,-0.009,0.057,-0.024,-0.012,-0.018,-0.058,-0.082,0.065,0.038,0.042,0.018,0.025,0.031,0.044,0.019,0.008,-0.021,-0.048,0.092]
     dates = [(dt(2022,1,1) + timedelta(days=31*i)).strftime('%y-%m') for i in range(len(bt_sp500))]
     
-    # 월별 수익률 바 차트 사수
+    # 월별 수익률 바 차트
     m_fig = go.Figure(go.Bar(x=dates, y=[v*100 for v in bt_sp500], marker_color=['#3fb950' if v > 0 else '#f85149' for v in bt_sp500]))
     m_fig.update_layout(template='plotly_dark', height=250, title="Monthly Returns (%)")
     st.plotly_chart(m_fig, use_container_width=True)
 
-    # 수익률 곡선 사수
+    # 수익률 곡선
     st_hist, bh_hist = [100.0], [100.0]
     in_m, c_d, cap_st, cap_bh, spy_p, last_ex_p = True, 0, 100.0, 100.0, 100.0, 100.0
     for r in bt_sp500:
