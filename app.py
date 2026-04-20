@@ -29,7 +29,7 @@ STATE_FILE = 'trend_state.json'
 HISTORY_FILE = 'history_trend.csv'
 
 # ==========================================
-# [체크리스트 2] KIS API 클래스 (통화 규격 수정)
+# [체크리스트 2] KIS API 클래스 (AMEX 규격 및 잔고 필드 강화)
 # ==========================================
 class KIS_Trader:
     def __init__(self):
@@ -54,13 +54,27 @@ class KIS_Trader:
         except Exception as e:
             self.error_detail = f"Conn: {str(e)}"
 
+    def get_balance(self):
+        if not self.token: return 0.0
+        try:
+            url = f"{self.base_url}/uapi/overseas-stock/v1/trading/inquire-balance"
+            headers = {"Content-Type":"application/json", "authorization":f"Bearer {self.token}", "appkey":self.app_key, "appsecret":self.app_secret, "tr_id":"JTTT3012R"}
+            # [수정] OVRS_EXCG_CD: "AMEX" 지정
+            params = {"CANO":self.cano, "ACNT_PRDT_CD":self.acnt_prdt_cd, "OVRS_EXCG_CD":"AMEX", "TR_CRCY_CD":"USD", "CTX_AREA_FK200":"", "CTX_AREA_NK200":""}
+            res = requests.get(url, headers=headers, params=params)
+            out2 = res.json().get('output2', {})
+            # [수정] 잔고 필드 우선순위 체크
+            bal = float(out2.get('frcr_dncl_amt_2') or out2.get('ovrs_stck_drct_buy_psbl_amt') or 0)
+            return bal
+        except: return 0.0
+
     def get_holdings(self, ticker=TRADE_TICKER):
         if not self.token: return 0
         try:
             url = f"{self.base_url}/uapi/overseas-stock/v1/trading/inquire-balance"
             headers = {"Content-Type":"application/json", "authorization":f"Bearer {self.token}", "appkey":self.app_key, "appsecret":self.app_secret, "tr_id":"JTTT3012R"}
-            # [수정] TR_CRC_CYCD -> TR_CRCY_CD
-            params = {"CANO":self.cano, "ACNT_PRDT_CD":self.acnt_prdt_cd, "OVRS_EXCG_CD":"", "TR_CRCY_CD":"USD", "CTX_AREA_FK200":"", "CTX_AREA_NK200":""}
+            # [수정] OVRS_EXCG_CD: "AMEX" 지정
+            params = {"CANO":self.cano, "ACNT_PRDT_CD":self.acnt_prdt_cd, "OVRS_EXCG_CD":"AMEX", "TR_CRCY_CD":"USD", "CTX_AREA_FK200":"", "CTX_AREA_NK200":""}
             res = requests.get(url, headers=headers, params=params)
             for item in res.json().get('output1', []):
                 if item.get('pdno') == ticker: return int(item.get('ccld_qty_smtl', 0))
@@ -131,7 +145,7 @@ def get_signal(spy_close, monthly, vix_close):
         return "WAIT", f"Waiting({rebound*100:.1f}%)", curr_p, state
 
 # ==========================================
-# [체크리스트 1~5] 트레이딩 실행 (전수 진단 강화)
+# [체크리스트 1~5] 트레이딩 실행 (디버그 강화)
 # ==========================================
 async def run_trading():
     now_kst = datetime.now(KST)
@@ -141,7 +155,7 @@ async def run_trading():
     token = os.getenv('TELEGRAM_TOKEN'); chat_id = os.getenv('CHAT_ID')
     bot = Bot(token=token) if (Bot and token) else None
     
-    # [민환님 테스트 가이드] 현재 시간 23시(KST)에 맞춰 개방
+    # [임시 테스트용] 현재 밤 11시(23시)이므로 23으로 설정
     if current_hour == 23: 
         spy_ohlc, monthly, vix_close, msg = get_market_data()
         if spy_ohlc.empty:
@@ -150,16 +164,15 @@ async def run_trading():
         
         signal, reason, price, state = get_signal(spy_ohlc['Close'], monthly, vix_close)
         
-        # [수정] TR_CRCY_CD 규격 반영 정밀 진단
+        # [체크리스트 4] BAL_DEBUG 원문 진단 (수정된 키 반영)
         url = f"{trader.base_url}/uapi/overseas-stock/v1/trading/inquire-balance"
         headers = {"Content-Type":"application/json", "authorization":f"Bearer {trader.token}", "appkey":trader.app_key, "appsecret":trader.app_secret, "tr_id":"JTTT3012R"}
-        # [수정] TR_CRCY_CD 적용
-        params = {"CANO":trader.cano, "ACNT_PRDT_CD":trader.acnt_prdt_cd, "OVRS_EXCG_CD":"", "TR_CRCY_CD":"USD", "CTX_AREA_FK200":"", "CTX_AREA_NK200":""}
+        params = {"CANO":trader.cano, "ACNT_PRDT_CD":trader.acnt_prdt_cd, "OVRS_EXCG_CD":"AMEX", "TR_CRCY_CD":"USD", "CTX_AREA_FK200":"", "CTX_AREA_NK200":""}
         
         bal_res = requests.get(url, headers=headers, params=params).json()
         out2_data = bal_res.get('output2', {})
         
-        # [체크리스트 4] 전체 응답 송신
+        # 텔레그램 전체 응답 송신
         if bot: 
             debug_msg = (
                 f"🔍 BAL_DEBUG (Full):\n"
@@ -169,9 +182,8 @@ async def run_trading():
             )
             await bot.send_message(chat_id=chat_id, text=debug_msg)
         
-        # 잔고 파싱
-        bal = float(out2_data.get('frcr_dncl_amt_2', 0))
-        if bal == 0: bal = float(out2_data.get('ovrs_stck_drct_buy_psbl_amt', 0))
+        # [수정] 잔고 파싱 로직 적용
+        bal = float(out2_data.get('frcr_dncl_amt_2') or out2_data.get('ovrs_stck_drct_buy_psbl_amt') or 0)
         
         qty = trader.get_holdings(TRADE_TICKER)
         exec_status = ""
@@ -194,13 +206,13 @@ async def run_trading():
                 with open(STATE_FILE, 'w') as f: json.dump({"in_market": False, "last_exit_price": price}, f)
             else: exec_status = f" | ❌ 매도실패: {res.get('rt_msg')}"
 
-        # 최종 디버그 인포
+        # 최종 디버그 보고
         token_status = "OK" if trader.token else "FAIL"
         debug_info = f"\nqty={qty} | bal={bal:.1f} | price={trader.get_current_price(TRADE_TICKER):.2f} | token={token_status}"
         if bot: await bot.send_message(chat_id=chat_id, text=f"[20:00] {signal}: {reason}{exec_status}{debug_info}")
 
     elif current_hour == 1:
-        # [체크리스트 2] 01:00 긴급 탈출 유지
+        # [체크리스트 2] 01:00 탈출 로직 유지
         spy_int = yf.download(SIGNAL_TICKER, period='1d', interval='5m', progress=False)
         if not spy_int.empty:
             spy_ret = (float(spy_int['Close'].iloc[-1]) / float(spy_int['Open'].iloc[0])) - 1
@@ -216,8 +228,8 @@ async def run_trading():
 # ==========================================
 def run_dashboard():
     now_kst = datetime.now(KST)
-    st.set_page_config(page_title="SP500 Watchtower v3.2.0", layout="wide")
-    st.sidebar.title("v3.2.0 Master")
+    st.set_page_config(page_title="SP500 Watchtower v3.2.1", layout="wide")
+    st.sidebar.title("v3.2.1 Master")
     st.sidebar.caption(f"Update: {now_kst.strftime('%H:%M:%S')} KST")
     st.sidebar.divider()
     st.sidebar.write("**EXIT:** VIX+30%, SPY-3%, 3d-5%, 2m Down")
@@ -228,6 +240,7 @@ def run_dashboard():
     if spy_ohlc.empty: st.error(f"❌ 데이터 로드 실패: {msg}"); return
     signal, reason, price, state = get_signal(spy_ohlc['Close'], monthly, vix_close)
     
+    # 5개 메트릭 카드
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1: st.metric("Position", "IN" if state.get('in_market') else "OUT")
     with c2: st.metric("Signal", signal)
