@@ -151,7 +151,7 @@ async def run_trading():
     bot = Bot(token=token_v) if (Bot and token_v) else None
     
     # [1] 정규 매매 공정 (20:00 KST)
-    if current_hour == 20: 
+    if current_hour == 1: 
         spy_ohlc, monthly, vix_close, msg = get_market_data()
         if spy_ohlc.empty: return
         signal, reason, price_val, state = get_signal(spy_ohlc['Close'], monthly, vix_close)
