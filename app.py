@@ -141,7 +141,7 @@ async def run_trading():
     token = os.getenv('TELEGRAM_TOKEN'); chat_id = os.getenv('CHAT_ID')
     bot = Bot(token=token) if (Bot and token) else None
     
-    if current_hour == 20:
+    if current_hour == 21:
         spy_ohlc, monthly, vix_close, msg = get_market_data()
         if spy_ohlc.empty:
             if bot: await bot.send_message(chat_id=chat_id, text=f"⚠️ [20:00] 데이터 로드 실패: {msg}")
