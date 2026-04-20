@@ -29,7 +29,7 @@ STATE_FILE = 'trend_state.json'
 HISTORY_FILE = 'history_trend.csv'
 
 # ==========================================
-# [체크리스트 2] KIS API 클래스 (해외 계좌 전수조사 규격)
+# [체크리스트 2] KIS API 클래스 (OVRS_EXCG_CD 규격 수정)
 # ==========================================
 class KIS_Trader:
     def __init__(self):
@@ -59,7 +59,8 @@ class KIS_Trader:
         try:
             url = f"{self.base_url}/uapi/overseas-stock/v1/trading/inquire-balance"
             headers = {"Content-Type":"application/json", "authorization":f"Bearer {self.token}", "appkey":self.app_key, "appsecret":self.app_secret, "tr_id":"JTTT3012R"}
-            params = {"CANO":self.cano, "ACNT_PRDT_CD":self.acnt_prdt_cd, "OVRS_EXGI":"", "TR_CRC_CYCD":"USD", "CTX_AREA_FK200":"", "CTX_AREA_NK200":""}
+            # [수정] OVRS_EXGI -> OVRS_EXCG_CD (전체 조회용)
+            params = {"CANO":self.cano, "ACNT_PRDT_CD":self.acnt_prdt_cd, "OVRS_EXCG_CD":"", "TR_CRC_CYCD":"USD", "CTX_AREA_FK200":"", "CTX_AREA_NK200":""}
             res = requests.get(url, headers=headers, params=params)
             for item in res.json().get('output1', []):
                 if item.get('pdno') == ticker: return int(item.get('ccld_qty_smtl', 0))
@@ -140,8 +141,8 @@ async def run_trading():
     token = os.getenv('TELEGRAM_TOKEN'); chat_id = os.getenv('CHAT_ID')
     bot = Bot(token=token) if (Bot and token) else None
     
-    # [민환님 테스트용] 현재 밤 10시(22시)에 맞춰 개방
-    if current_hour == 22: 
+    # [민환님 테스트 가이드] 현재 시간 23시(KST)에 맞춰 개방
+    if current_hour == 23: 
         spy_ohlc, monthly, vix_close, msg = get_market_data()
         if spy_ohlc.empty:
             if bot: await bot.send_message(chat_id=chat_id, text=f"⚠️ 데이터 로드 실패: {msg}")
@@ -149,15 +150,15 @@ async def run_trading():
         
         signal, reason, price, state = get_signal(spy_ohlc['Close'], monthly, vix_close)
         
-        # [수정] 민환님이 요청하신 BAL_DEBUG 응답 전체 출력 섹션
+        # [수정] OVRS_EXCG_CD 규격 반영 정밀 진단
         url = f"{trader.base_url}/uapi/overseas-stock/v1/trading/inquire-balance"
         headers = {"Content-Type":"application/json", "authorization":f"Bearer {trader.token}", "appkey":trader.app_key, "appsecret":trader.app_secret, "tr_id":"JTTT3012R"}
-        params = {"CANO":trader.cano, "ACNT_PRDT_CD":trader.acnt_prdt_cd, "OVRS_EXGI":"", "TR_CRC_CYCD":"USD", "CTX_AREA_FK200":"", "CTX_AREA_NK200":""}
+        params = {"CANO":trader.cano, "ACNT_PRDT_CD":trader.acnt_prdt_cd, "OVRS_EXCG_CD":"", "TR_CRC_CYCD":"USD", "CTX_AREA_FK200":"", "CTX_AREA_NK200":""}
         
         bal_res = requests.get(url, headers=headers, params=params).json()
         out2_data = bal_res.get('output2', {})
         
-        # [핵심 수정] 텔레그램으로 rt_cd, msg1 포함 전체 응답 송신
+        # [마스터 체크리스트 4] 전체 응답 송신
         if bot: 
             debug_msg = (
                 f"🔍 BAL_DEBUG (Full):\n"
@@ -167,7 +168,7 @@ async def run_trading():
             )
             await bot.send_message(chat_id=chat_id, text=debug_msg)
         
-        # 잔고 파싱
+        # 잔고 파싱 (여러 필드 검사)
         bal = float(out2_data.get('frcr_dncl_amt_2', 0))
         if bal == 0: bal = float(out2_data.get('ovrs_stck_drct_buy_psbl_amt', 0))
         
@@ -192,7 +193,7 @@ async def run_trading():
                 with open(STATE_FILE, 'w') as f: json.dump({"in_market": False, "last_exit_price": price}, f)
             else: exec_status = f" | ❌ 매도실패: {res.get('rt_msg')}"
 
-        # [체크리스트 4] 최종 보고
+        # 최종 디버그 인포
         token_status = "OK" if trader.token else "FAIL"
         debug_info = f"\nqty={qty} | bal={bal:.1f} | price={trader.get_current_price(TRADE_TICKER):.2f} | token={token_status}"
         if bot: await bot.send_message(chat_id=chat_id, text=f"[20:00] {signal}: {reason}{exec_status}{debug_info}")
@@ -207,15 +208,15 @@ async def run_trading():
                 if qty > 0:
                     trader.send_order(TRADE_TICKER, qty, "SELL")
                     with open(STATE_FILE, 'w') as f: json.dump({"in_market": False, "last_exit_price": float(spy_int['Close'].iloc[-1])}, f)
-                    if bot: await bot.send_message(chat_id=bot.chat_id, text="🚨 [01:00 긴급] 전량 매도 완료")
+                    if bot: await bot.send_message(chat_id=chat_id, text="🚨 [01:00 긴급] 전량 매도 완료")
 
 # ==========================================
 # [체크리스트 6~11] 스트림릿 대시보드
 # ==========================================
 def run_dashboard():
     now_kst = datetime.now(KST)
-    st.set_page_config(page_title="SP500 Watchtower v3.1.8", layout="wide")
-    st.sidebar.title("v3.1.8 Master")
+    st.set_page_config(page_title="SP500 Watchtower v3.1.9", layout="wide")
+    st.sidebar.title("v3.1.9 Master")
     st.sidebar.caption(f"Update: {now_kst.strftime('%H:%M:%S')} KST")
     st.sidebar.divider()
     st.sidebar.write("**EXIT:** VIX+30%, SPY-3%, 3d-5%, 2m Down")
@@ -252,12 +253,10 @@ def run_dashboard():
     bt_sp500 = [-0.053,-0.030,0.035,-0.087,-0.006,-0.082,0.092,-0.041,-0.094,0.079,0.054,-0.058,0.062,-0.025,0.035,0.015,-0.001,0.065,0.031,-0.017,-0.048,-0.022,0.087,0.044,0.016,0.052,0.031,-0.041,0.048,0.035,0.011,0.024,0.022,-0.009,0.057,-0.024,-0.012,-0.018,-0.058,-0.082,0.065,0.038,0.042,0.018,0.025,0.031,0.044,0.019,0.008,-0.021,-0.048,0.092]
     dates = [(datetime(2022,1,1) + timedelta(days=31*i)).strftime('%y-%m') for i in range(len(bt_sp500))]
     
-    # 월별 수익률 바 차트
     m_fig = go.Figure(go.Bar(x=dates, y=[v*100 for v in bt_sp500], marker_color=['#3fb950' if v > 0 else '#f85149' for v in bt_sp500]))
     m_fig.update_layout(template='plotly_dark', height=250, margin=dict(l=10,r=10,t=10,b=10), title="Historical Monthly Returns (%)")
     st.plotly_chart(m_fig, use_container_width=True)
 
-    # 전략 비교 차트
     st_hist, bh_hist = [100.0], [100.0]
     in_m, c_d, cap_st, cap_bh, spy_p, last_ex_p = True, 0, 100.0, 100.0, 100.0, 100.0
     for r in bt_sp500:
@@ -279,13 +278,11 @@ def run_dashboard():
     c_fig.update_layout(template='plotly_dark', height=300, margin=dict(l=10,r=10,t=10,b=10), yaxis_title="Manwon (Start: 100)")
     st.plotly_chart(c_fig, use_container_width=True)
 
-    # 동적 리포트
     with st.expander("Strategy Guide & Performance Details"):
         final = st_hist[-1]
         st.write(f"### 📈 Dynamic Total Return: {(final-100):.1f}%")
         st.write(f"Initial: 100 Manwon -> **Final: {final:.0f} Manwon**")
 
-    # 히스토리 로그
     if os.path.exists(HISTORY_FILE):
         st.subheader("📋 History Logs")
         st.dataframe(pd.read_csv(HISTORY_FILE), use_container_width=True, hide_index=True)
