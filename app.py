@@ -30,7 +30,7 @@ STATE_FILE = 'trend_state.json'
 HISTORY_FILE = 'history_trend.csv'
 
 # ==========================================
-# [체크리스트 2] KIS API 클래스 (빈 응답 방어 적용)
+# [체크리스트 2] KIS API 클래스 (인증 키 및 시세 tr_id 수정)
 # ==========================================
 class KIS_Trader:
     def __init__(self):
@@ -46,7 +46,12 @@ class KIS_Trader:
     def _set_token(self):
         try:
             url = f"{self.base_url}/oauth2/tokenP"
-            data = {"grant_type": "client_credentials", "appkey": self.app_key, "secretkey": self.app_secret}
+            # [수정] secretkey -> appsecret (인증 이름표 고정)
+            data = {
+                "grant_type": "client_credentials", 
+                "appkey": self.app_key, 
+                "appsecret": self.app_secret 
+            }
             res = requests.post(url, headers={"content-type": "application/json"}, data=json.dumps(data))
             res_data = res.json()
             self.token = res_data.get('access_token')
@@ -77,14 +82,20 @@ class KIS_Trader:
             return 0
         except: return 0
 
+    # [수정] tr_id: "HHDFS00000300" -> "HHDFS76240000" (민환님 분석 반영)
     def get_current_price(self, ticker=TRADE_TICKER):
         if not self.token: return 0.0
         try:
             url = f"{self.base_url}/uapi/overseas-stock/v1/quotations/price"
-            headers = {"Content-Type":"application/json", "authorization":f"Bearer {self.token}", "appkey":self.app_key, "appsecret":self.app_secret, "tr_id":"HHDFS00000300"}
+            headers = {
+                "Content-Type":"application/json", 
+                "authorization":f"Bearer {self.token}", 
+                "appkey":self.app_key, 
+                "appsecret":self.app_secret, 
+                "tr_id":"HHDFS76240000"
+            }
             for excd in ["NYS", "NAS", "AMS"]:
                 response = requests.get(url, headers=headers, params={"AUTH": "", "EXCD": excd, "PDNO": ticker})
-                # [방어] 빈 응답 및 상태 코드 체크
                 if not response.text or response.status_code != 200: continue
                 res = response.json()
                 price = float(res.get('output', {}).get('last', 0))
@@ -146,7 +157,7 @@ def get_signal(spy_close, monthly, vix_close):
         return "WAIT", f"Waiting({rebound*100:.1f}%)", curr_p, state
 
 # ==========================================
-# [체크리스트 1~5] 트레이딩 실행
+# [체크리스트 1~5] 트레이딩 실행 (시간 고정: 23시)
 # ==========================================
 async def run_trading():
     now_kst = dt.now(KST)
@@ -156,7 +167,7 @@ async def run_trading():
     token = os.getenv('TELEGRAM_TOKEN'); chat_id = os.getenv('CHAT_ID')
     bot = Bot(token=token) if (Bot and token) else None
     
-    # [민환님 테스트 가이드] 현재 밤 11시(23시)이므로 23으로 설정
+    # [민환님 가이드] 현재 밤 11시 42분이므로 23시 개방 유지
     if current_hour == 23: 
         spy_ohlc, monthly, vix_close, msg = get_market_data()
         if spy_ohlc.empty:
@@ -165,20 +176,25 @@ async def run_trading():
         
         signal, reason, price, state = get_signal(spy_ohlc['Close'], monthly, vix_close)
         
-        # [1] 잔고 조회 (746달러 인식 완료)
+        # [1] 잔고 조회
         bal = trader.get_balance()
         if bot: await bot.send_message(chat_id=chat_id, text=f"🔍 BAL_DEBUG: {bal:.2f} USD 확인")
 
-        # [2] 민환님 요청: 가격 디버그 스캔 루프 (방어 로직 추가)
+        # [2] 가격 디버그 스캔 루프 (tr_id 수정 반영)
         cur_p = 0.0
         for excd in ["NYS", "NAS", "AMS"]:
             response = requests.get(
                 f"{trader.base_url}/uapi/overseas-stock/v1/quotations/price",
-                headers={"Content-Type":"application/json", "authorization":f"Bearer {trader.token}", "appkey":trader.app_key, "appsecret":trader.app_secret, "tr_id":"HHDFS00000300"},
+                headers={
+                    "Content-Type":"application/json", 
+                    "authorization":f"Bearer {trader.token}", 
+                    "appkey":trader.app_key, 
+                    "appsecret":trader.app_secret, 
+                    "tr_id":"HHDFS76240000" # [수정]
+                },
                 params={"AUTH":"", "EXCD":excd, "PDNO":TRADE_TICKER}
             )
             
-            # [방어] 민환님이 요청하신 빈 응답 및 상태 코드 검사 섹션
             if not response.text or response.status_code != 200:
                 if bot: await bot.send_message(chat_id=chat_id, text=f"PRICE_DEBUG {excd}: 빈 응답 (status={response.status_code})")
                 continue
@@ -212,13 +228,13 @@ async def run_trading():
                 with open(STATE_FILE, 'w') as f: json.dump({"in_market": False, "last_exit_price": price}, f)
             else: exec_status = f" | ❌ 매도실패: {res.get('rt_msg')}"
 
-        # 최종 디버그 보고
+        # [체크리스트 4] 최종 디버그 인포
         token_status = "OK" if trader.token else "FAIL"
         debug_info = f"\nqty={qty} | bal={bal:.1f} | price={cur_p:.2f} | token={token_status}"
         if bot: await bot.send_message(chat_id=chat_id, text=f"[20:00] {signal}: {reason}{exec_status}{debug_info}")
 
     elif current_hour == 1:
-        # [체크리스트 2] 01:00 탈출 로직 유지
+        # [체크리스트 2] 01:00 탈출 로직 완비
         spy_int = yf.download(SIGNAL_TICKER, period='1d', interval='5m', progress=False)
         if not spy_int.empty:
             spy_ret = (float(spy_int['Close'].iloc[-1]) / float(spy_int['Open'].iloc[0])) - 1
@@ -234,8 +250,8 @@ async def run_trading():
 # ==========================================
 def run_dashboard():
     now_kst = dt.now(KST)
-    st.set_page_config(page_title="SP500 Watchtower v3.2.7", layout="wide")
-    st.sidebar.title("v3.2.7 Master")
+    st.set_page_config(page_title="SP500 Watchtower v3.2.8", layout="wide")
+    st.sidebar.title("v3.2.8 Master")
     st.sidebar.caption(f"Update: {now_kst.strftime('%H:%M:%S')} KST")
     st.sidebar.divider()
     st.sidebar.write("**EXIT:** VIX+30%, SPY-3%, 3d-5%, 2m Down")
@@ -246,6 +262,7 @@ def run_dashboard():
     if spy_ohlc.empty: st.error(f"❌ 데이터 로드 실패: {msg}"); return
     signal, reason, price, state = get_signal(spy_ohlc['Close'], monthly, vix_close)
     
+    # 5개 메트릭 카드
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1: st.metric("Position", "IN" if state.get('in_market') else "OUT")
     with c2: st.metric("Signal", signal)
@@ -257,7 +274,7 @@ def run_dashboard():
     elif signal == "EXIT": st.error(f"[EMERGENCY] {reason}")
     else: st.info(f"[INFO] {reason}")
 
-    # 시장 차트
+    # 3단 통합 차트
     common_idx = spy_ohlc.index.intersection(vix_close.index)
     ohlc_p, vix_p = spy_ohlc.loc[common_idx].tail(126), vix_close.loc[common_idx].tail(126)
     fig = make_subplots(rows=3, cols=1, row_heights=[0.5, 0.25, 0.25], shared_xaxes=True, vertical_spacing=0.05)
