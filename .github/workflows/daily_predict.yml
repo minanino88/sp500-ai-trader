@@ -3,7 +3,7 @@ name: SP500 Trend Following Bot
 on:
   schedule:
     # 1. KST 20:00 (UTC 11:00) - 전체 추세 체크 및 매매
-    - cron: '0 14 * * 1-5'
+    - cron: '0 15 * * 1-5'
     # 2. KST 01:00 (UTC 16:00) - 장중 긴급 탈출 전용
     - cron: '0 16 * * 1-5'
   workflow_dispatch:
