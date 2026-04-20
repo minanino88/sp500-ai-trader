@@ -30,7 +30,7 @@ STATE_FILE = 'trend_state.json'
 HISTORY_FILE = 'history_trend.csv'
 
 # ==========================================
-# 2. KIS API 클래스 (실전/조회 tr_id 정밀 교정)
+# 2. KIS API 클래스 (거래소 코드 AMEX 교정)
 # ==========================================
 class KIS_Trader:
     def __init__(self):
@@ -57,7 +57,7 @@ class KIS_Trader:
         if not self.token: return 0.0
         try:
             url = f"{self.base_url}/uapi/overseas-stock/v1/trading/inquire-psamount"
-            # [수정] 민환님 가이드: 잔고 조치는 JTTT 규격 사용
+            # 잔고조회는 JTTT 규격 유지
             headers = {"Content-Type":"application/json", "authorization":f"Bearer {self.token}", "appkey":self.app_key, "appsecret":self.app_secret, "tr_id":"JTTT3007R", "custtype":"P"}
             params = {"CANO": self.cano, "ACNT_PRDT_CD": self.acnt_prdt_cd, "OVRS_EXCG_CD": "AMEX", "OVRS_ORD_UNPR": "1", "ITEM_CD": TRADE_TICKER}
             res = requests.get(url, headers=headers, params=params).json()
@@ -68,7 +68,7 @@ class KIS_Trader:
         if not self.token: return 0
         try:
             url = f"{self.base_url}/uapi/overseas-stock/v1/trading/inquire-balance"
-            # [수정] 민환님 가이드: 보유 주식 조회는 JTTT 규격 사용
+            # 보유량 조회는 JTTT 규격 유지
             headers = {"Content-Type":"application/json", "authorization":f"Bearer {self.token}", "appkey":self.app_key, "appsecret":self.app_secret, "tr_id":"JTTT3012R", "custtype":"P"}
             params = {"CANO":self.cano, "ACNT_PRDT_CD":self.acnt_prdt_cd, "OVRS_EXCG_CD":"AMEX", "TR_CRCY_CD":"USD", "CTX_AREA_FK200":"", "CTX_AREA_NK200":""}
             res = requests.get(url, headers=headers, params=params)
@@ -88,20 +88,23 @@ class KIS_Trader:
         if not self.token: return {"rt_cd": "1", "rt_msg": "No Token"}
         try:
             url = f"{self.base_url}/uapi/overseas-stock/v1/trading/order"
-            # [유지] 실전 주문은 TTTT 규격 사용
+            # 실전 주문 tr_id (TTTT) 사수
             tr_id = "TTTT1002U" if side == "BUY" else "TTTT1006U"
             headers = {"Content-Type":"application/json", "authorization":f"Bearer {self.token}", "appkey":self.app_key, "appsecret":self.app_secret, "tr_id":tr_id, "custtype":"P"}
             clean_qty = str(int(float(qty)))
+            
+            # [최종 교정] OVRS_EXGI 값을 NYSE에서 AMEX로 변경 (UPRO/NYSE Arca ETF용)
             data = {
                 "CANO": self.cano, "ACNT_PRDT_CD": self.acnt_prdt_cd, 
-                "OVRS_EXGI": "NYSE", "PDNO": ticker, 
+                "OVRS_EXGI": "AMEX", 
+                "PDNO": ticker, 
                 "ORD_QTY": clean_qty, "ORD_DVP": "01", "ORD_UNPR": "0"
             }
             return requests.post(url, headers=headers, data=json.dumps(data)).json()
         except Exception as e: return {"rt_cd": "1", "rt_msg": str(e)}
 
 # ==========================================
-# 3. 데이터 엔진 & 지능형 신호 (무결성 유지)
+# 3. 데이터 엔진 & 지능형 신호 (Float/VIX 로직 유지)
 # ==========================================
 def get_market_data():
     try:
@@ -120,6 +123,7 @@ def get_signal(spy_close, monthly, vix_close):
     else: state = {"in_market": True, "last_exit_price": 0}
     if spy_close.empty or len(spy_close) < 20: return "WAIT", "Loading", 0.0, state
     
+    # [Float 캐스팅 사수]
     curr_p = float(spy_close.iloc[-1])
     spy_daily_ret = float((spy_close.iloc[-1] / spy_close.iloc[-2]) - 1)
     vix_daily_ret = float((vix_close.iloc[-1] / vix_close.iloc[-2]) - 1)
@@ -133,6 +137,7 @@ def get_signal(spy_close, monthly, vix_close):
         if len(recent) == 2 and recent[0] < 0 and recent[1] < 0: return "EXIT", "2m Down", curr_p, state
         return "KEEP", "Holding", curr_p, state
     else:
+        # [VIX 역발상 로직 사수]
         rebound = (curr_p - state['last_exit_price']) / state['last_exit_price'] if state['last_exit_price'] > 0 else 0
         vix_now, vix_prev = float(vix_close.iloc[-1]), float(vix_close.iloc[-2])
         vix_20d = vix_close.tail(20)
@@ -143,14 +148,14 @@ def get_signal(spy_close, monthly, vix_close):
         return "WAIT", f"Waiting({rebound*100:.1f}%)", curr_p, state
 
 # ==========================================
-# 4. 트레이딩 실행 (문제 2 해결: 공정 분리)
+# 4. 트레이딩 실행 (공정 분리: 20시 vs 01시)
 # ==========================================
 async def run_trading():
     now_kst = dt.now(KST); current_hour = now_kst.hour
     trader = KIS_Trader(); token_v = os.getenv('TELEGRAM_TOKEN'); chat_id = os.getenv('CHAT_ID')
     bot = Bot(token=token_v) if (Bot and token_v) else None
     
-    # [1] 정규 매매 공정 (20:00 KST)
+    # [1] 정규 매매 (20:00 KST)
     if current_hour == 1: 
         spy_ohlc, monthly, vix_close, msg = get_market_data()
         if spy_ohlc.empty: return
@@ -177,7 +182,7 @@ async def run_trading():
 
         if bot: await bot.send_message(chat_id=chat_id, text=f"[{now_kst.strftime('%H:%M')}] {signal}: {reason}{exec_status}\nUPRO: ${cur_p:.2f}")
 
-    # [2] 비상 탈출 전용 공정 (01:00 KST) - elif로 분리하여 독립성 확보
+    # [2] 비상 탈출 (01:00 KST)
     elif current_hour == 1:
         spy_int = yf.download(SIGNAL_TICKER, period='1d', interval='5m', progress=False)
         if not spy_int.empty:
@@ -194,9 +199,9 @@ async def run_trading():
 # ==========================================
 def run_dashboard():
     now_kst = dt.now(KST)
-    st.set_page_config(page_title="SP500 Watchtower v3.6.5", layout="wide")
+    st.set_page_config(page_title="SP500 Watchtower v3.6.6", layout="wide")
     
-    st.sidebar.title("v3.6.5 Master")
+    st.sidebar.title("v3.6.6 Master")
     st.sidebar.caption(f"Update: {now_kst.strftime('%H:%M:%S')} KST")
     st.sidebar.divider()
     st.sidebar.write("**EXIT:** VIX+30%, SPY-3%, 3d-5%, 2m Down")
@@ -207,11 +212,9 @@ def run_dashboard():
     if spy_ohlc.empty: st.error("Data Load Fail"); return
     signal, reason, price, state = get_signal(spy_ohlc['Close'], monthly, vix_close)
     
-    # 5개 지표 카드
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1: st.metric("Position", "IN" if state.get('in_market') else "OUT")
-    with c2: st.metric("Signal", signal)
-    with c3: st.metric("SPY Price", f"${price:.2f}")
+    with c2: st.metric("Signal", signal); with c3: st.metric("SPY Price", f"${price:.2f}")
     with c4: st.metric("Daily Ret", f"{((spy_ohlc['Close'].iloc[-1]/spy_ohlc['Close'].iloc[-2])-1)*100:+.2f}%")
     with c5: st.metric("VIX Value", f"{vix_close.iloc[-1]:.2f}")
 
@@ -219,7 +222,7 @@ def run_dashboard():
     elif signal == "EXIT": st.error(f"[EMERGENCY] {reason}")
     else: st.info(f"[INFO] {reason}")
 
-    # 3단 통합 차트 사수
+    # 3단 통합 차트
     fig = make_subplots(rows=3, cols=1, row_heights=[0.5, 0.25, 0.25], shared_xaxes=True, vertical_spacing=0.05)
     fig.add_trace(go.Candlestick(x=spy_ohlc.tail(126).index, open=spy_ohlc.tail(126)['Open'], high=spy_ohlc.tail(126)['High'], low=spy_ohlc.tail(126)['Low'], close=spy_ohlc.tail(126)['Close'], name='SPY'), row=1, col=1)
     fig.add_trace(go.Bar(x=vix_close.tail(126).index, y=vix_close.tail(126).values, name='VIX', marker_color='orange'), row=2, col=1)
@@ -232,12 +235,12 @@ def run_dashboard():
     bt_sp500 = [-0.053,-0.030,0.035,-0.087,-0.006,-0.082,0.092,-0.041,-0.094,0.079,0.054,-0.058,0.062,-0.025,0.035,0.015,-0.001,0.065,0.031,-0.017,-0.048,-0.022,0.087,0.044,0.016,0.052,0.031,-0.041,0.048,0.035,0.011,0.024,0.022,-0.009,0.057,-0.024,-0.012,-0.018,-0.058,-0.082,0.065,0.038,0.042,0.018,0.025,0.031,0.044,0.019,0.008,-0.021,-0.048,0.092]
     dates = [(dt(2022,1,1) + timedelta(days=31*i)).strftime('%y-%m') for i in range(len(bt_sp500))]
     
-    # [복구 확인] 월별 수익률 바 차트
+    # 월별 수익률 바 차트
     m_fig = go.Figure(go.Bar(x=dates, y=[v*100 for v in bt_sp500], marker_color=['#3fb950' if v > 0 else '#f85149' for v in bt_sp500]))
     m_fig.update_layout(template='plotly_dark', height=250, title="Monthly Returns (%)")
     st.plotly_chart(m_fig, use_container_width=True)
 
-    # [복구 확인] 수익률 곡선
+    # 수익률 곡선
     st_hist, bh_hist = [100.0], [100.0]
     in_m, c_d, cap_st, cap_bh, spy_p, last_ex_p = True, 0, 100.0, 100.0, 100.0, 100.0
     for r in bt_sp500:
@@ -252,12 +255,7 @@ def run_dashboard():
             if rebound >= 0.02: in_m, c_d, ret_st = True, 0, r * 3 - 0.001
             else: ret_st = 0
         cap_st *= (1 + ret_st); st_hist.append(cap_st)
-    
-    c_fig = go.Figure()
-    c_fig.add_trace(go.Scatter(x=['22-01']+dates, y=st_hist, name='Strategy', line=dict(color='#3fb950')))
-    c_fig.add_trace(go.Scatter(x=['22-01']+dates, y=bh_hist, name='SPY B&H', line=dict(color='gray', dash='dash')))
-    c_fig.update_layout(template='plotly_dark', height=300, yaxis_title="Equity (Base 100)")
-    st.plotly_chart(c_fig, use_container_width=True)
+    st.plotly_chart(go.Figure().add_trace(go.Scatter(x=['22-01']+dates, y=st_hist, name='Strategy', line=dict(color='#3fb950'))).add_trace(go.Scatter(x=['22-01']+dates, y=bh_hist, name='SPY B&H', line=dict(color='gray', dash='dash'))).update_layout(template='plotly_dark', height=300, yaxis_title="Equity"), use_container_width=True)
 
     if os.path.exists(HISTORY_FILE):
         st.subheader("📋 Trade Logs")
