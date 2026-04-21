@@ -159,7 +159,7 @@ async def run_trading():
     trader = KIS_Trader(); token_v = os.getenv('TELEGRAM_TOKEN'); chat_id = os.getenv('CHAT_ID')
     bot = Bot(token=token_v) if (Bot and token_v) else None
     
-    if current_hour == 10: 
+    if current_hour == 20: 
         spy_ohlc, monthly, vix_close, msg = get_market_data()
         if spy_ohlc.empty: return
         signal, reason, price_val, state = get_signal(spy_ohlc['Close'], monthly, vix_close)
